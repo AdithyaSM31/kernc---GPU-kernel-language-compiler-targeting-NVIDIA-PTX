@@ -1,0 +1,5 @@
+build/
+*.ptx
+*.cubin
+.vscode/
+.cache/

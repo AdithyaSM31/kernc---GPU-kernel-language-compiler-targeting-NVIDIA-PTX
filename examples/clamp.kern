@@ -1,0 +1,14 @@
+kernel clamp(float* in, float* out, float min_val, float max_val, int n) {
+    int i = block_idx * block_dim + thread_idx;
+    if (i < n) {
+        float val = in[i];
+        if (val < min_val) {
+            val = min_val;
+        } else {
+            if (val > max_val) {
+                val = max_val;
+            }
+        }
+        out[i] = val;
+    }
+}

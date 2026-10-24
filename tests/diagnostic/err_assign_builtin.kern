@@ -1,0 +1,4 @@
+// Expected error: cannot assign to built-in 'thread_idx'
+kernel test() {
+    thread_idx = 42;
+}

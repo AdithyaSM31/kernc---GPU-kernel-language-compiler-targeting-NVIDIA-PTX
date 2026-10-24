@@ -1,0 +1,71 @@
+#pragma once
+
+#include "kernc/AST.h"
+#include "kernc/IR.h"
+#include "kernc/Diagnostics.h"
+#include <unordered_map>
+#include <string>
+
+namespace kernc {
+
+class IRGen {
+public:
+    explicit IRGen(DiagnosticsEngine& diag);
+
+    IRModule emitModule(const Program& program);
+    IRFunction emitKernel(const KernelDecl& kernel);
+
+private:
+    void emitStmt(const Stmt& stmt, IRFunction& fn);
+    void emitVarDecl(const VarDeclStmt& stmt, IRFunction& fn);
+    void emitAssign(const AssignStmt& stmt, IRFunction& fn);
+    void emitIf(const IfStmt& stmt, IRFunction& fn);
+    void emitWhile(const WhileStmt& stmt, IRFunction& fn);
+    void emitFor(const ForStmt& stmt, IRFunction& fn);
+    void emitBlock(const BlockStmt& stmt, IRFunction& fn);
+
+    VReg emitExpr(const Expr& expr, IRFunction& fn);
+    VReg emitBinaryExpr(const BinaryExpr& expr, IRFunction& fn);
+    VReg emitUnaryExpr(const UnaryExpr& expr, IRFunction& fn);
+    VReg emitIndexExpr(const IndexExpr& expr, IRFunction& fn);
+    VReg emitCastExpr(const CastExpr& expr, IRFunction& fn);
+    VReg emitBuiltin(const BuiltinExpr& expr, IRFunction& fn);
+
+    void emitCondition(const Expr& cond, const Label& trueLabel, const Label& falseLabel, IRFunction& fn);
+
+    struct VarInfo {
+        VReg reg;
+        Type type;
+    };
+
+    void enterScope() {
+        varScopes_.emplace_back();
+    }
+
+    void exitScope() {
+        if (!varScopes_.empty()) {
+            varScopes_.pop_back();
+        }
+    }
+
+    void setVar(const std::string& name, VReg reg, Type type) {
+        if (!varScopes_.empty()) {
+            varScopes_.back()[name] = {reg, type};
+        }
+    }
+
+    const VarInfo* getVar(const std::string& name) const {
+        for (auto it = varScopes_.rbegin(); it != varScopes_.rend(); ++it) {
+            auto found = it->find(name);
+            if (found != it->end()) {
+                return &found->second;
+            }
+        }
+        return nullptr;
+    }
+
+    DiagnosticsEngine& diag_;
+    std::vector<std::unordered_map<std::string, VarInfo>> varScopes_;
+};
+
+} // namespace kernc

@@ -1,0 +1,5 @@
+// Expected error: subscripted value is not a pointer
+kernel test() {
+    int a = 10;
+    int b = a[0];
+}

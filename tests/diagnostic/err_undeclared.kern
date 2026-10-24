@@ -1,0 +1,4 @@
+// Expected error: undeclared variable 'y'
+kernel test() {
+    int x = y;
+}

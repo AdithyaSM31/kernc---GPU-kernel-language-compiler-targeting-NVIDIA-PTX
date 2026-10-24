@@ -1,0 +1,5 @@
+// Expected error: redefinition of variable 'x'
+kernel test() {
+    int x = 1;
+    int x = 2;
+}

@@ -1,0 +1,4 @@
+// Expected error: invalid cast
+kernel test(int* p) {
+    int x = cast<int>(p);
+}

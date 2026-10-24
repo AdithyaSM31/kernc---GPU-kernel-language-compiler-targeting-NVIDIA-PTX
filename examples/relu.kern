@@ -1,0 +1,10 @@
+kernel relu(float* in, float* out, int n) {
+    int i = block_idx * block_dim + thread_idx;
+    if (i < n) {
+        float val = in[i];
+        if (val < 0.0f) {
+            val = 0.0f;
+        }
+        out[i] = val;
+    }
+}

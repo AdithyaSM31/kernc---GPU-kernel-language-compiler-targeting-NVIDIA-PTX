@@ -1,0 +1,4 @@
+// Expected error: type mismatch in variable initialization
+kernel test(int* p) {
+    int x = p;
+}
