@@ -141,6 +141,33 @@ TEST(ParserTest, ControlFlowStatements) {
     ASSERT_NE(forStmt->step, nullptr);
 }
 
+TEST(ParserTest, SharedArrayDecl) {
+    auto k = parseKernel("kernel test() { shared float buf[256]; __shared__ int idx[8]; }");
+    ASSERT_NE(k, nullptr);
+    ASSERT_EQ(k->body.size(), 2u);
+
+    auto* buf = dynamic_cast<SharedDeclStmt*>(k->body[0].get());
+    ASSERT_NE(buf, nullptr);
+    EXPECT_EQ(buf->elemType.kind, Type::Float);
+    EXPECT_EQ(buf->name, "buf");
+    EXPECT_EQ(buf->size, 256);
+
+    auto* idx = dynamic_cast<SharedDeclStmt*>(k->body[1].get());
+    ASSERT_NE(idx, nullptr);
+    EXPECT_EQ(idx->elemType.kind, Type::Int);
+    EXPECT_EQ(idx->size, 8);
+}
+
+TEST(ParserTest, SharedArraySizeMustBeLiteral) {
+    // Static shared memory is sized at compile time, so the size is a literal.
+    DiagnosticsEngine diag;
+    Lexer lexer("kernel test(int n) { shared float buf[n]; }", &diag);
+    Parser parser(lexer, diag);
+    parser.parseKernel();
+    EXPECT_NE(diag.formatAll().find("1:39: error: expected integer literal as shared array size"),
+              std::string::npos) << diag.formatAll();
+}
+
 TEST(ParserTest, ReturnStatement) {
     std::string src = "kernel test(int n) {\n"
                       "    if (n > 0) return;\n"

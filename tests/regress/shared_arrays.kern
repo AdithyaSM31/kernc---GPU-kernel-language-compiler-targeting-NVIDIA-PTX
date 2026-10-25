@@ -1,0 +1,18 @@
+// Shared array symbols must be unique per module: two kernels both declare `buf`, and one
+// kernel declares `tmp` in two sibling scopes.
+kernel first(float* o) {
+    shared float buf[64];
+    shared int counts[32];
+    buf[thread_idx % 64] = 1.0;
+    counts[thread_idx % 32] = thread_idx;
+    barrier();
+    o[thread_idx] = buf[0] + cast<float>(counts[1]);
+}
+
+kernel second(int* o, int n) {
+    shared int buf[128];
+    if (n > 0) { shared int tmp[4]; tmp[0] = n; buf[0] = tmp[0]; }
+    else { shared int tmp[4]; tmp[1] = 2; buf[1] = tmp[1]; }
+    barrier();
+    o[0] = buf[0] + buf[1];
+}

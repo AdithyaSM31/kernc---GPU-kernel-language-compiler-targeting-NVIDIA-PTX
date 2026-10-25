@@ -298,6 +298,31 @@ TEST(IRPassTest, ShortCircuitValueGuardsLoad) {
     EXPECT_GE(countOps(fn, IROp::Load), 1) << fn.dump();
 }
 
+TEST(IRPassTest, SharedArrayLowersToSharedStateSpace) {
+    auto fn = compileToIR("kernel t(float* o) {\n"
+                          "    shared float buf[128];\n"
+                          "    buf[thread_idx] = 2.0;\n"
+                          "    barrier();\n"
+                          "    o[thread_idx] = buf[127 - thread_idx];\n"
+                          "}\n");
+    Optimizer::runPasses(fn);
+    std::string ptx = PTXEmitter().emitFunction(fn);
+
+    // Declared at module scope, before the entry, with a per-kernel name (like nvcc).
+    size_t decl = ptx.find(".shared .align 4 .f32 t_buf[128];");
+    ASSERT_NE(decl, std::string::npos) << ptx;
+    EXPECT_LT(decl, ptx.find(".visible .entry t")) << ptx;
+    EXPECT_NE(ptx.find("bar.sync 0;"), std::string::npos) << ptx;
+
+    // Shared addresses are 32-bit offsets into the shared window: %r, not %rd.
+    auto st = operandsOf(ptx, "st.shared.f32");
+    ASSERT_EQ(st.size(), 2u) << ptx;
+    EXPECT_TRUE(isRegClass(st[0].substr(1), "%r")) << ptx; // "[%rN]"
+    auto ld = operandsOf(ptx, "ld.shared.f32");
+    ASSERT_EQ(ld.size(), 2u) << ptx;
+    EXPECT_TRUE(isRegClass(ld[1].substr(1), "%r")) << ptx;
+}
+
 TEST(IRPassTest, PTXEmissionValidStructure) {
     std::string src = "kernel vecadd(int* a, int* b, int* c, int n) {\n"
                       "    int i = block_idx * block_dim + thread_idx;\n"

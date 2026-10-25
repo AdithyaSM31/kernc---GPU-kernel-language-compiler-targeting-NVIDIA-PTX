@@ -32,6 +32,7 @@ private:
     std::unique_ptr<Stmt> parseIfStmt();
     std::unique_ptr<Stmt> parseWhileStmt();
     std::unique_ptr<Stmt> parseReturnStmt();
+    std::unique_ptr<Stmt> parseSharedDecl();
     std::unique_ptr<Stmt> parseForStmt();
     std::unique_ptr<BlockStmt> parseBlock();
     std::unique_ptr<Stmt> parseExprOrAssignStmt();

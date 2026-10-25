@@ -38,9 +38,14 @@ private:
     VReg emitShortCircuitValue(const BinaryExpr& expr, IRFunction& fn);
     static bool isComparison(BinaryOp op);
 
+    void emitSharedDecl(const SharedDeclStmt& stmt, IRFunction& fn);
+    // Address of base[index]; sets `space` and `elemType` for the Load/Store that uses it.
+    VReg emitElementAddress(const IndexExpr& idx, IRFunction& fn, AddrSpace& space, IRType& elemType);
+
     struct VarInfo {
-        VReg reg;
+        VReg reg;                 // 0 for shared arrays, which live in memory, not a register
         Type type;
+        std::string sharedSymbol; // module-scope .shared symbol, for shared arrays
     };
 
     void enterScope() {
@@ -53,9 +58,9 @@ private:
         }
     }
 
-    void setVar(const std::string& name, VReg reg, Type type) {
+    void setVar(const std::string& name, VReg reg, Type type, std::string sharedSymbol = "") {
         if (!varScopes_.empty()) {
-            varScopes_.back()[name] = {reg, type};
+            varScopes_.back()[name] = {reg, type, std::move(sharedSymbol)};
         }
     }
 

@@ -175,6 +175,42 @@ TEST(SemaTest, BoolParameterRejected) {
               std::string::npos) << diag.formatAll();
 }
 
+TEST(SemaTest, SharedArraysAccepted) {
+    std::string src = "kernel test(float* o, int n) {\n"
+                      "    shared float a[256];\n"
+                      "    shared int b[64];\n"
+                      "    a[thread_idx] = 1.0;\n"
+                      "    b[thread_idx % 64] = thread_idx;\n"
+                      "    barrier();\n"
+                      "    o[0] = a[0] + cast<float>(b[1]);\n"
+                      "    { shared float c[8]; c[0] = a[1]; }\n"
+                      "}\n";
+    DiagnosticsEngine diag;
+    EXPECT_TRUE(checkSource(src, diag)) << diag.formatAll();
+}
+
+TEST(SemaTest, SharedArrayErrors) {
+    const std::pair<const char*, const char*> cases[] = {
+        {"shared float a[0];", "2:5: error: shared array 'a' must have a positive size"},
+        {"shared bool a[4];", "shared arrays must have element type 'int' or 'float' (got 'bool')"},
+        {"shared float* a[4];", "shared arrays must have element type 'int' or 'float' (got 'float*')"},
+        {"shared float a[4];\n    float x = a;", "shared array 'a' cannot be used as a value"},
+        {"shared float a[4];\n    a = 1.0;", "cannot assign to shared array 'a'"},
+        {"shared float a[4];\n    float x = a[1.5];", "array subscript is not an integer"},
+        {"int a = 1;\n    shared float a[4];", "redefinition of variable 'a'"},
+        // 48 KB of static shared memory per block on sm_86 (ptxas: "0xc000 max").
+        {"shared float a[8192];\n    shared float b[4097];",
+         "error: kernel 'test' uses 49156 bytes of shared memory (static limit is 49152)"},
+    };
+    for (const auto& [stmts, expected] : cases) {
+        std::string src = std::string("kernel test(float* o) {\n    ") + stmts + "\n}\n";
+        DiagnosticsEngine diag;
+        EXPECT_FALSE(checkSource(src, diag)) << stmts;
+        EXPECT_NE(diag.formatAll().find(expected), std::string::npos)
+            << stmts << "\n" << diag.formatAll();
+    }
+}
+
 TEST(SemaTest, NonIntSubscript) {
     std::string src = "kernel test(float* p) {\n"
                       "    float y = p[1.5];\n"

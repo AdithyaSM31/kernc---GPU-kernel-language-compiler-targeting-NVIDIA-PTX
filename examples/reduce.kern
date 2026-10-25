@@ -1,0 +1,53 @@
+// Parallel sum reduction: each block reduces block_dim elements into partial[block_idx].
+// Launch with a power-of-two block size of at most 256, then repeat on the partial sums
+// until one value remains.
+//
+// Every thread must reach every barrier(), so out-of-range threads contribute 0 instead of
+// returning early. The loop condition depends only on block_dim, so it is uniform across
+// the block and the barrier inside it is safe.
+kernel reduce_sum(float* in, float* partial, int n) {
+    shared float sdata[256];
+    int tid = thread_idx;
+    int i = block_idx * block_dim + thread_idx;
+    float v = 0.0;
+    if (i < n) {
+        v = in[i];
+    }
+    sdata[tid] = v;
+    barrier();
+
+    for (int s = block_dim / 2; s > 0; s = s / 2) {
+        if (tid < s) {
+            sdata[tid] = sdata[tid] + sdata[tid + s];
+        }
+        barrier();
+    }
+
+    if (tid == 0) {
+        partial[block_idx] = sdata[0];
+    }
+}
+
+// Same algorithm on ints, where the result is exact and can be compared bit-for-bit.
+kernel reduce_sum_int(int* in, int* partial, int n) {
+    shared int sdata[256];
+    int tid = thread_idx;
+    int i = block_idx * block_dim + thread_idx;
+    int v = 0;
+    if (i < n) {
+        v = in[i];
+    }
+    sdata[tid] = v;
+    barrier();
+
+    for (int s = block_dim / 2; s > 0; s = s / 2) {
+        if (tid < s) {
+            sdata[tid] = sdata[tid] + sdata[tid + s];
+        }
+        barrier();
+    }
+
+    if (tid == 0) {
+        partial[block_idx] = sdata[0];
+    }
+}

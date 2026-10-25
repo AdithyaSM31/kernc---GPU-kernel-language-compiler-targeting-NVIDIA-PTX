@@ -135,6 +135,9 @@ std::unique_ptr<Stmt> Parser::parseStmt() {
     if (check(TokenKind::KW_return)) {
         return parseReturnStmt();
     }
+    if (check(TokenKind::KW_shared)) {
+        return parseSharedDecl();
+    }
     if (check(TokenKind::LBrace)) {
         return parseBlock();
     }
@@ -201,6 +204,28 @@ std::unique_ptr<Stmt> Parser::parseWhileStmt() {
     consume(TokenKind::RParen, "expected ')' after while condition");
     auto body = parseStmt();
     auto stmt = std::make_unique<WhileStmt>(std::move(cond), std::move(body));
+    stmt->range = {startLoc, current_.loc};
+    return stmt;
+}
+
+// shared <type> <name> [ <integer literal> ] ;
+std::unique_ptr<Stmt> Parser::parseSharedDecl() {
+    SourceLocation startLoc = current_.loc;
+    consume(TokenKind::KW_shared, "expected 'shared'");
+    Type elemType = parseType(); // Sema restricts it to int/float
+    Token nameTok = consume(TokenKind::Identifier, "expected shared array name");
+    consume(TokenKind::LBracket, "expected '[' after shared array name");
+    int64_t size = 0;
+    if (check(TokenKind::IntLiteral)) {
+        size = advance().intVal;
+    } else {
+        // Static shared memory is laid out by ptxas, so its size must be known at compile time.
+        diag_.error(current_.loc, "expected integer literal as shared array size");
+        hasError_ = true;
+    }
+    consume(TokenKind::RBracket, "expected ']' after shared array size");
+    consume(TokenKind::Semicolon, "expected ';' after shared array declaration");
+    auto stmt = std::make_unique<SharedDeclStmt>(elemType, std::string(nameTok.text), size);
     stmt->range = {startLoc, current_.loc};
     return stmt;
 }

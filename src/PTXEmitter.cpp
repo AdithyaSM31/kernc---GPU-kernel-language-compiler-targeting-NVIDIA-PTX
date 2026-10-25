@@ -77,6 +77,14 @@ std::string PTXEmitter::emitFunction(const IRFunction& fn) {
     }
 
     std::ostringstream ss;
+    // Shared arrays are module-scope symbols (as nvcc emits them); ptxas attributes each one to
+    // the kernels that reference it when it reports shared-memory usage.
+    for (const auto& sv : fn.sharedVars) {
+        ss << ".shared .align 4 ." << (sv.elemType == IRType::F32 ? "f32" : "s32") << " "
+           << sv.symbol << "[" << sv.count << "];\n";
+    }
+    if (!fn.sharedVars.empty()) ss << "\n";
+
     ss << ".visible .entry " << fn.name << "(\n";
     for (size_t i = 0; i < fn.params.size(); ++i) {
         const auto& param = fn.params[i];
@@ -257,20 +265,20 @@ std::string PTXEmitter::emitFunction(const IRFunction& fn) {
                 case IROp::AddS64:
                     ss << "    add.s64 " << dst << ", " << s1 << ", " << s2 << ";\n";
                     break;
+                case IROp::SharedAddr:
+                    ss << "    mov.u32 " << dst << ", " << inst.symbol << ";\n";
+                    break;
                 case IROp::Load:
-                    if (inst.type == IRType::F32) {
-                        ss << "    ld.global.f32 " << dst << ", [" << s1 << "];\n";
+                case IROp::Store: {
+                    const char* space = inst.space == AddrSpace::Shared ? "shared" : "global";
+                    const char* ty = inst.type == IRType::F32 ? "f32" : "s32";
+                    if (inst.op == IROp::Load) {
+                        ss << "    ld." << space << "." << ty << " " << dst << ", [" << s1 << "];\n";
                     } else {
-                        ss << "    ld.global.s32 " << dst << ", [" << s1 << "];\n";
+                        ss << "    st." << space << "." << ty << " [" << s1 << "], " << s2 << ";\n";
                     }
                     break;
-                case IROp::Store:
-                    if (inst.type == IRType::F32) {
-                        ss << "    st.global.f32 [" << s1 << "], " << s2 << ";\n";
-                    } else {
-                        ss << "    st.global.s32 [" << s1 << "], " << s2 << ";\n";
-                    }
-                    break;
+                }
 
                 // Special Register
                 case IROp::ReadSReg:

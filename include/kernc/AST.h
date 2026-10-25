@@ -8,9 +8,9 @@
 namespace kernc {
 
 struct Type {
-    enum Kind { Void, Int, Float, Ptr, Bool };
+    enum Kind { Void, Int, Float, Ptr, Bool, SharedArray };
     Kind kind = Void;
-    Kind pointeeKind = Void;
+    Kind pointeeKind = Void; // element type for Ptr and SharedArray
 
     static Type makeVoid() { return {Void, Void}; }
     static Type makeInt() { return {Int, Void}; }
@@ -18,16 +18,18 @@ struct Type {
     static Type makeIntPtr() { return {Ptr, Int}; }
     static Type makeFloatPtr() { return {Ptr, Float}; }
     static Type makeBool() { return {Bool, Void}; }
+    static Type makeSharedArray(Kind elem) { return {SharedArray, elem}; }
 
     bool isVoid() const { return kind == Void; }
     bool isInt() const { return kind == Int; }
     bool isFloat() const { return kind == Float; }
     bool isPtr() const { return kind == Ptr; }
     bool isBool() const { return kind == Bool; }
+    bool isSharedArray() const { return kind == SharedArray; }
 
     bool operator==(const Type& o) const {
         if (kind != o.kind) return false;
-        if (kind == Ptr) return pointeeKind == o.pointeeKind;
+        if (kind == Ptr || kind == SharedArray) return pointeeKind == o.pointeeKind;
         return true;
     }
     bool operator!=(const Type& o) const { return !(*this == o); }
@@ -42,6 +44,8 @@ struct Type {
                 if (pointeeKind == Int) return "int*";
                 if (pointeeKind == Float) return "float*";
                 return "ptr";
+            case SharedArray:
+                return pointeeKind == Float ? "shared float[]" : "shared int[]";
         }
         return "unknown";
     }
@@ -211,6 +215,14 @@ struct BarrierStmt : public Stmt {};
 struct ReturnStmt : public Stmt {
     std::unique_ptr<Expr> value; // can be nullptr
     explicit ReturnStmt(std::unique_ptr<Expr> v = nullptr) : value(std::move(v)) {}
+};
+
+// `shared float buf[256];`: a per-block array in the .shared state space, sized at compile time.
+struct SharedDeclStmt : public Stmt {
+    Type elemType;
+    std::string name;
+    int64_t size = 0;
+    SharedDeclStmt(Type t, std::string n, int64_t s) : elemType(t), name(std::move(n)), size(s) {}
 };
 
 // Kernel / Top-level

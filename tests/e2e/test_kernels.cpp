@@ -10,7 +10,10 @@
 #include <cmath>
 #include <limits>
 #include <random>
+#include <algorithm>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 
 using namespace kernc;
 
@@ -588,6 +591,120 @@ TEST_F(KernelE2ETest, BoolValuesMatchCpu) {
                                            << " (a=" << a[k / kBoolOutputs]
                                            << ", x=" << x[k / kBoolOutputs] << ")";
         }
+    }
+}
+
+// -------------------------------------------------------------
+// Shared memory
+// -------------------------------------------------------------
+// Each thread writes tile[t] and reads tile[block_dim - 1 - t], which another warp wrote, so
+// the result is only correct if the barrier orders the writes before the reads.
+TEST_F(KernelE2ETest, BlockReverseThroughSharedMemory) {
+    std::string src = "kernel reverse_block(int* in, int* out) {\n"
+                      "    shared int tile[256];\n"
+                      "    int t = thread_idx;\n"
+                      "    int base = block_idx * block_dim;\n"
+                      "    tile[t] = in[base + t];\n"
+                      "    barrier();\n"
+                      "    out[base + t] = tile[block_dim - 1 - t];\n"
+                      "}\n";
+    std::string ptx = compileSourceToPTX(src);
+    ASSERT_FALSE(ptx.empty());
+    CUmodule mod = loadPTX(ptx);
+    ASSERT_NE(mod, nullptr);
+    CUfunction func;
+    CHECK_CUDA(cuModuleGetFunction(&func, mod, "reverse_block"));
+
+    const int blockSize = 256, gridSize = 8, total = blockSize * gridSize;
+    std::vector<int> h_in(total), h_out(total, 0);
+    for (int k = 0; k < total; ++k) h_in[k] = k * 3 + 1;
+    CUdeviceptr d_in, d_out;
+    CHECK_CUDA(cuMemAlloc(&d_in, total * sizeof(int)));
+    CHECK_CUDA(cuMemAlloc(&d_out, total * sizeof(int)));
+    CHECK_CUDA(cuMemcpyHtoD(d_in, h_in.data(), total * sizeof(int)));
+    void* args[] = { &d_in, &d_out };
+    CHECK_CUDA(cuLaunchKernel(func, gridSize, 1, 1, blockSize, 1, 1, 0, 0, args, 0));
+    CHECK_CUDA(cuCtxSynchronize());
+    CHECK_CUDA(cuMemcpyDtoH(h_out.data(), d_out, total * sizeof(int)));
+
+    for (int b = 0; b < gridSize; ++b) {
+        for (int t = 0; t < blockSize; ++t) {
+            ASSERT_EQ(h_out[b * blockSize + t], h_in[b * blockSize + blockSize - 1 - t])
+                << "block " << b << " thread " << t;
+        }
+    }
+    CHECK_CUDA(cuMemFree(d_in));
+    CHECK_CUDA(cuMemFree(d_out));
+    CHECK_CUDA(cuModuleUnload(mod));
+}
+
+static std::string readFile(const std::string& path) {
+    std::ifstream in(path);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+// Reduces `data` to one value by relaunching the kernel on the partial sums until one remains.
+template <typename T>
+static T reduceOnGpu(CUfunction func, const std::vector<T>& data) {
+    const int blockSize = 256;
+    int n = static_cast<int>(data.size());
+    int maxBlocks = (n + blockSize - 1) / blockSize;
+    CUdeviceptr d_a, d_b;
+    EXPECT_EQ(cuMemAlloc(&d_a, n * sizeof(T)), CUDA_SUCCESS);
+    EXPECT_EQ(cuMemAlloc(&d_b, maxBlocks * sizeof(T)), CUDA_SUCCESS);
+    EXPECT_EQ(cuMemcpyHtoD(d_a, data.data(), n * sizeof(T)), CUDA_SUCCESS);
+    CUdeviceptr in = d_a, out = d_b;
+    do {
+        int grid = (n + blockSize - 1) / blockSize;
+        void* args[] = { &in, &out, &n };
+        EXPECT_EQ(cuLaunchKernel(func, grid, 1, 1, blockSize, 1, 1, 0, 0, args, 0), CUDA_SUCCESS);
+        std::swap(in, out);
+        n = grid;
+    } while (n > 1);
+    EXPECT_EQ(cuCtxSynchronize(), CUDA_SUCCESS);
+    T result{};
+    EXPECT_EQ(cuMemcpyDtoH(&result, in, sizeof(T)), CUDA_SUCCESS);
+    cuMemFree(d_a);
+    cuMemFree(d_b);
+    return result;
+}
+
+// Runs examples/reduce.kern itself, so the shipped example is what gets tested.
+TEST_F(KernelE2ETest, ReductionExampleMatchesCpu) {
+    std::string src = readFile(std::string(KERNC_EXAMPLES_DIR) + "/reduce.kern");
+    ASSERT_FALSE(src.empty()) << "could not read examples/reduce.kern";
+    for (bool optimize : {false, true}) {
+        std::string ptx = compileSourceToPTX(src, optimize);
+        ASSERT_FALSE(ptx.empty());
+        CUmodule mod = loadPTX(ptx);
+        ASSERT_NE(mod, nullptr);
+        CUfunction fsum, isum;
+        CHECK_CUDA(cuModuleGetFunction(&fsum, mod, "reduce_sum"));
+        CHECK_CUDA(cuModuleGetFunction(&isum, mod, "reduce_sum_int"));
+
+        for (int n : {1, 255, 256, 257, 1000, (1 << 20) + 3}) {
+            std::vector<int> ints(n);
+            std::vector<float> floats(n);
+            long long exact = 0;
+            double ref = 0.0;
+            for (int k = 0; k < n; ++k) {
+                ints[k] = static_cast<int>((static_cast<unsigned>(k) * 7919u) % 10u) - 3;
+                floats[k] = static_cast<float>((k * 2654435761u) % 1000) / 1000.0f;
+                exact += ints[k];
+                ref += floats[k];
+            }
+            const char* opt = optimize ? "-O1" : "-O0";
+            // Integer addition is associative, so the tree sum is exact.
+            EXPECT_EQ(reduceOnGpu(isum, ints), exact) << opt << " int n=" << n;
+            // A tree sum adds floats in a different order than a sequential loop. Its error
+            // grows with log2(n), far below this bound for n up to 2^20 and inputs in [0, 1).
+            float got = reduceOnGpu(fsum, floats);
+            EXPECT_LE(std::fabs(got - ref), 1e-5 * std::max(1.0, ref))
+                << opt << " float n=" << n << " got " << got << " expected " << ref;
+        }
+        CHECK_CUDA(cuModuleUnload(mod));
     }
 }
 

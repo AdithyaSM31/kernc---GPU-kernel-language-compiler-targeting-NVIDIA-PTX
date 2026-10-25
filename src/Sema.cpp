@@ -33,12 +33,44 @@ bool Sema::checkKernel(KernelDecl& kernel) {
         }
     }
 
+    sharedBytes_ = 0;
     for (auto& stmt : kernel.body) {
         checkStmt(*stmt);
+    }
+    // ptxas would reject this too ("uses too much shared data"), but without a source location.
+    if (sharedBytes_ > kStaticSharedLimit) {
+        diag_.error(kernel.range.begin, "kernel '" + kernel.name + "' uses " +
+                    std::to_string(sharedBytes_) + " bytes of shared memory (static limit is " +
+                    std::to_string(kStaticSharedLimit) + ")");
     }
 
     symTable_.exitScope();
     return !diag_.hasErrors();
+}
+
+void Sema::checkSharedDecl(SharedDeclStmt& stmt) {
+    bool ok = true;
+    if (!stmt.elemType.isInt() && !stmt.elemType.isFloat()) {
+        diag_.error(stmt.range.begin, "shared arrays must have element type 'int' or 'float' (got '" +
+                    stmt.elemType.toString() + "')");
+        ok = false;
+    }
+    if (stmt.size <= 0) {
+        diag_.error(stmt.range.begin, "shared array '" + stmt.name + "' must have a positive size");
+        ok = false;
+    }
+    if (stmt.name == "thread_idx" || stmt.name == "block_idx" || stmt.name == "block_dim") {
+        diag_.error(stmt.range.begin, "cannot declare variable with reserved builtin name '" + stmt.name + "'");
+        return;
+    }
+    if (!symTable_.declare(stmt.name, Type::makeSharedArray(stmt.elemType.kind))) {
+        diag_.error(stmt.range.begin, "redefinition of variable '" + stmt.name + "'");
+        return;
+    }
+    if (ok) {
+        // Every element is 4 bytes. Clamp so a huge literal cannot overflow the running total.
+        sharedBytes_ += stmt.size > kStaticSharedLimit ? kStaticSharedLimit + 1 : stmt.size * 4;
+    }
 }
 
 void Sema::checkStmt(Stmt& stmt) {
@@ -58,6 +90,8 @@ void Sema::checkStmt(Stmt& stmt) {
         checkExpr(*exprStmt->expr);
     } else if (dynamic_cast<BarrierStmt*>(&stmt)) {
         // barrier() takes no args, returns void
+    } else if (auto* shared = dynamic_cast<SharedDeclStmt*>(&stmt)) {
+        checkSharedDecl(*shared);
     } else if (auto* ret = dynamic_cast<ReturnStmt*>(&stmt)) {
         if (ret->value) {
             checkExpr(*ret->value);
@@ -97,6 +131,14 @@ void Sema::checkVarDecl(VarDeclStmt& stmt) {
 }
 
 void Sema::checkAssign(AssignStmt& stmt) {
+    if (auto* ident = dynamic_cast<IdentExpr*>(stmt.target.get())) {
+        const Type* t = symTable_.lookup(ident->name);
+        if (t && t->isSharedArray()) {
+            diag_.error(stmt.target->range.begin, "cannot assign to shared array '" + ident->name +
+                        "' (assign to an element, e.g. " + ident->name + "[i])");
+            return;
+        }
+    }
     Type targetType = checkExpr(*stmt.target);
     Type valueType = checkExpr(*stmt.value);
 
@@ -209,10 +251,17 @@ Type Sema::checkExpr(Expr& expr) {
     return Type::makeVoid();
 }
 
-Type Sema::checkIdentExpr(IdentExpr& expr) {
+Type Sema::checkIdentExpr(IdentExpr& expr, bool allowSharedArray) {
     const Type* t = symTable_.lookup(expr.name);
     if (!t) {
         diag_.error(expr.range.begin, "undeclared variable '" + expr.name + "'");
+        expr.resolvedType = Type::makeVoid();
+        return expr.resolvedType;
+    }
+    // A shared array has no value of its own (no register holds it); only its elements do.
+    if (t->isSharedArray() && !allowSharedArray) {
+        diag_.error(expr.range.begin, "shared array '" + expr.name +
+                    "' cannot be used as a value (index it, e.g. " + expr.name + "[i])");
         expr.resolvedType = Type::makeVoid();
         return expr.resolvedType;
     }
@@ -341,11 +390,13 @@ Type Sema::checkUnaryExpr(UnaryExpr& expr) {
 }
 
 Type Sema::checkIndexExpr(IndexExpr& expr) {
-    Type baseType = checkExpr(*expr.base);
+    auto* baseIdent = dynamic_cast<IdentExpr*>(expr.base.get());
+    Type baseType = baseIdent ? checkIdentExpr(*baseIdent, /*allowSharedArray=*/true)
+                              : checkExpr(*expr.base);
     Type indexType = checkExpr(*expr.index);
 
-    if (!baseType.isPtr()) {
-        diag_.error(expr.base->range.begin, "subscripted value is not a pointer (type is '" + baseType.toString() + "')");
+    if (!baseType.isPtr() && !baseType.isSharedArray()) {
+        diag_.error(expr.base->range.begin, "subscripted value is not a pointer or shared array (type is '" + baseType.toString() + "')");
         expr.resolvedType = Type::makeVoid();
         return expr.resolvedType;
     }

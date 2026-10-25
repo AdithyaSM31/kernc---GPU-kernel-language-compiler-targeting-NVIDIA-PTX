@@ -52,7 +52,8 @@ const char* irOpToString(IROp op) {
         case IROp::MulWide:    return "mul.wide";
         case IROp::AddS64:     return "add.s64";
         case IROp::CvtaGlobal: return "cvta.to.global";
-        case IROp::Bra:        return "bra";
+        case IROp::SharedAddr: return "addr.shared";
+        case IROp::Bra:      return "bra";
         case IROp::BraCond:    return "bra.cond";
         case IROp::Ret:        return "ret";
         case IROp::ReadSReg:   return "readsreg";
@@ -85,10 +86,13 @@ std::string IRInst::toString() const {
             ss << "%v" << src1 << " ? " << trueTarget << " : " << falseTarget;
             break;
         case IROp::Store:
-            ss << "[%v" << src1 << "], %v" << src2;
+            ss << (space == AddrSpace::Shared ? "shared" : "global") << " [%v" << src1 << "], %v" << src2;
             break;
         case IROp::Load:
-            ss << "[%v" << src1 << "]";
+            ss << (space == AddrSpace::Shared ? "shared" : "global") << " [%v" << src1 << "]";
+            break;
+        case IROp::SharedAddr:
+            ss << symbol;
             break;
         case IROp::Neg:
         case IROp::FNeg:

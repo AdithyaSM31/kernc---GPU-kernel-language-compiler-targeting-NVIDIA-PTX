@@ -10,6 +10,7 @@ static IRType toIRType(const Type& t) {
         case Type::Bool:  return IRType::Pred;
         case Type::Int:
         case Type::Void:  break;
+        case Type::SharedArray: break; // lives in memory, never in a register
     }
     return IRType::S32;
 }
@@ -101,6 +102,8 @@ void IRGen::emitStmt(const Stmt& stmt, IRFunction& fn) {
         emitExpr(*exprStmt->expr, fn);
     } else if (dynamic_cast<const BarrierStmt*>(&stmt)) {
         fn.emit(IRInst{IROp::Bar, 0, 0, 0, IRType::S32});
+    } else if (auto* shared = dynamic_cast<const SharedDeclStmt*>(&stmt)) {
+        emitSharedDecl(*shared, fn);
     } else if (dynamic_cast<const ReturnStmt*>(&stmt)) {
         // ret in a .entry ends this thread. It terminates the block, so any statements after
         // it go into a new block that nothing branches to (unreachable, but well-formed).
@@ -135,30 +138,70 @@ void IRGen::emitAssign(const AssignStmt& stmt, IRFunction& fn) {
         }
         fn.emit(IRInst{IROp::Mov, vInfo->reg, valReg, 0, toIRType(vInfo->type)});
     } else if (auto* idx = dynamic_cast<const IndexExpr*>(stmt.target.get())) {
-        auto* baseIdent = dynamic_cast<const IdentExpr*>(idx->base.get());
-        const VarInfo* baseInfo = getVar(baseIdent->name);
-
-        VReg idxReg = emitExpr(*idx->index, fn);
-        VReg szReg = fn.freshReg(IRType::S32);
-        IRInst ldimm{IROp::LoadImm, szReg, 0, 0, IRType::S32};
-        ldimm.immInt = 4;
-        fn.emit(ldimm);
-
-        VReg offReg = fn.freshReg(IRType::S64);
-        fn.emit(IRInst{IROp::MulWide, offReg, idxReg, szReg, IRType::S64});
-
-        VReg addrReg = fn.freshReg(IRType::S64);
-        fn.emit(IRInst{IROp::AddS64, addrReg, baseInfo->reg, offReg, IRType::S64});
+        AddrSpace space;
+        IRType elemType;
+        VReg addrReg = emitElementAddress(*idx, fn, space, elemType);
 
         VReg valReg = emitExpr(*stmt.value, fn);
-        if (baseInfo->type.pointeeKind == Type::Float && stmt.value->resolvedType.isInt()) {
+        if (elemType == IRType::F32 && stmt.value->resolvedType.isInt()) {
             VReg cvtReg = fn.freshReg(IRType::F32);
             fn.emit(IRInst{IROp::CvtI2F, cvtReg, valReg, 0, IRType::F32});
             valReg = cvtReg;
         }
-        IRType stType = (baseInfo->type.pointeeKind == Type::Float ? IRType::F32 : IRType::S32);
-        fn.emit(IRInst{IROp::Store, 0, addrReg, valReg, stType});
+        IRInst store{IROp::Store, 0, addrReg, valReg, elemType};
+        store.space = space;
+        fn.emit(store);
     }
+}
+
+void IRGen::emitSharedDecl(const SharedDeclStmt& stmt, IRFunction& fn) {
+    // Module-scope symbol named after the kernel, made unique if the same name is declared
+    // again in another scope of this kernel.
+    std::string symbol = fn.name + "_" + stmt.name;
+    auto taken = [&](const std::string& s) {
+        for (const auto& sv : fn.sharedVars)
+            if (sv.symbol == s) return true;
+        return false;
+    };
+    for (int n = 1; taken(symbol); ++n) {
+        symbol = fn.name + "_" + stmt.name + "_" + std::to_string(n);
+    }
+    fn.sharedVars.push_back({symbol, toIRType(stmt.elemType), stmt.size});
+    setVar(stmt.name, 0, Type::makeSharedArray(stmt.elemType.kind), symbol);
+}
+
+VReg IRGen::emitElementAddress(const IndexExpr& idx, IRFunction& fn, AddrSpace& space, IRType& elemType) {
+    auto* baseIdent = dynamic_cast<const IdentExpr*>(idx.base.get());
+    const VarInfo* baseInfo = getVar(baseIdent->name);
+    elemType = baseInfo->type.pointeeKind == Type::Float ? IRType::F32 : IRType::S32;
+
+    VReg idxReg = emitExpr(*idx.index, fn);
+    VReg szReg = fn.freshReg(IRType::S32);
+    IRInst ldimm{IROp::LoadImm, szReg, 0, 0, IRType::S32};
+    ldimm.immInt = 4;
+    fn.emit(ldimm);
+
+    if (baseInfo->type.isSharedArray()) {
+        // 32-bit arithmetic: shared addresses are offsets into the block's shared window.
+        space = AddrSpace::Shared;
+        VReg baseReg = fn.freshReg(IRType::S32);
+        IRInst addrOf{IROp::SharedAddr, baseReg, 0, 0, IRType::S32};
+        addrOf.symbol = baseInfo->sharedSymbol;
+        fn.emit(addrOf);
+        VReg offReg = fn.freshReg(IRType::S32);
+        fn.emit(IRInst{IROp::Mul, offReg, idxReg, szReg, IRType::S32});
+        VReg addrReg = fn.freshReg(IRType::S32);
+        fn.emit(IRInst{IROp::Add, addrReg, baseReg, offReg, IRType::S32});
+        return addrReg;
+    }
+
+    // Global pointer: widen the 32-bit index while scaling it, then add the 64-bit base.
+    space = AddrSpace::Global;
+    VReg offReg = fn.freshReg(IRType::S64);
+    fn.emit(IRInst{IROp::MulWide, offReg, idxReg, szReg, IRType::S64});
+    VReg addrReg = fn.freshReg(IRType::S64);
+    fn.emit(IRInst{IROp::AddS64, addrReg, baseInfo->reg, offReg, IRType::S64});
+    return addrReg;
 }
 
 void IRGen::emitIf(const IfStmt& stmt, IRFunction& fn) {
@@ -526,24 +569,13 @@ VReg IRGen::emitUnaryExpr(const UnaryExpr& expr, IRFunction& fn) {
 }
 
 VReg IRGen::emitIndexExpr(const IndexExpr& expr, IRFunction& fn) {
-    auto* baseIdent = dynamic_cast<const IdentExpr*>(expr.base.get());
-    const VarInfo* baseInfo = getVar(baseIdent->name);
-
-    VReg idxReg = emitExpr(*expr.index, fn);
-    VReg szReg = fn.freshReg(IRType::S32);
-    IRInst ldimm{IROp::LoadImm, szReg, 0, 0, IRType::S32};
-    ldimm.immInt = 4;
-    fn.emit(ldimm);
-
-    VReg offReg = fn.freshReg(IRType::S64);
-    fn.emit(IRInst{IROp::MulWide, offReg, idxReg, szReg, IRType::S64});
-
-    VReg addrReg = fn.freshReg(IRType::S64);
-    fn.emit(IRInst{IROp::AddS64, addrReg, baseInfo->reg, offReg, IRType::S64});
-
-    IRType loadType = (baseInfo->type.pointeeKind == Type::Float ? IRType::F32 : IRType::S32);
+    AddrSpace space;
+    IRType loadType;
+    VReg addrReg = emitElementAddress(expr, fn, space, loadType);
     VReg dstReg = fn.freshReg(loadType);
-    fn.emit(IRInst{IROp::Load, dstReg, addrReg, 0, loadType});
+    IRInst load{IROp::Load, dstReg, addrReg, 0, loadType};
+    load.space = space;
+    fn.emit(load);
     return dstReg;
 }
 

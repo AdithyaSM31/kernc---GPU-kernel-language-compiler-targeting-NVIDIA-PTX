@@ -64,13 +64,14 @@ private:
     void checkWhile(WhileStmt& stmt);
     void checkFor(ForStmt& stmt);
     void checkBlock(BlockStmt& stmt);
+    void checkSharedDecl(SharedDeclStmt& stmt);
 
     Type checkExpr(Expr& expr);
     Type checkBinaryExpr(BinaryExpr& expr);
     Type checkUnaryExpr(UnaryExpr& expr);
     Type checkIndexExpr(IndexExpr& expr);
     Type checkCastExpr(CastExpr& expr);
-    Type checkIdentExpr(IdentExpr& expr);
+    Type checkIdentExpr(IdentExpr& expr, bool allowSharedArray = false);
     Type checkIntLiteral(IntLiteralExpr& expr, bool negated);
 
     bool isConditionType(const Type& t) const {
@@ -80,6 +81,10 @@ private:
     DiagnosticsEngine& diag_;
     SymbolTable symTable_;
     std::string currentKernel_; // for diagnostics such as "kernel 'k' cannot return a value"
+
+    // Static shared memory per block on sm_86 (ptxas reports the limit as 0xc000).
+    static constexpr int64_t kStaticSharedLimit = 48 * 1024;
+    int64_t sharedBytes_ = 0;   // shared memory declared so far in the current kernel
 };
 
 } // namespace kernc

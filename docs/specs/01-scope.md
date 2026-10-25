@@ -45,4 +45,12 @@
 - Loops: `while (cond) { ... }`, `for (init; cond; step) { ... }`.
 - Return: `return;` -> `ret;`, which ends the calling thread (other threads continue).
   Kernels return void, so `return expr;` is an error.
-- Synchronization: `barrier();` -> `bar.sync 0;`.
+- Shared memory: `shared float buf[256];` (or `__shared__`) declares a per-block array in the
+  `.shared` state space. The element type is `int` or `float`, the size is an integer literal,
+  and a kernel may declare at most 48 KB (49152 bytes) of shared memory in total (the sm_86
+  static limit). Only elements can be read or written (`buf[i]`); the array itself is not a
+  value. Arrays are emitted at module scope as `<kernel>_<name>` and addressed with 32-bit
+  shared-window offsets (`mov.u32`, `mul.lo.s32`, `ld/st.shared`).
+- Synchronization: `barrier();` -> `bar.sync 0;`. Every thread of the block must reach each
+  barrier, so a barrier must not sit behind a condition that differs between threads (or
+  after an early `return` taken by some of them). See `examples/reduce.kern`.
