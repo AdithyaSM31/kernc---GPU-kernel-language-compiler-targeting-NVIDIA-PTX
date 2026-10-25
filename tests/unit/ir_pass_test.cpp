@@ -13,6 +13,11 @@
 
 using namespace kernc;
 
+namespace kernc {
+// Lets GoogleTest print "4:9" instead of raw bytes in failure messages.
+void PrintTo(const SourceLocation& loc, std::ostream* os) { *os << loc.line << ":" << loc.column; }
+} // namespace kernc
+
 static IRFunction compileToIR(const std::string& src) {
     DiagnosticsEngine diag;
     Lexer lexer(src, &diag);
@@ -321,6 +326,83 @@ TEST(IRPassTest, SharedArrayLowersToSharedStateSpace) {
     auto ld = operandsOf(ptx, "ld.shared.f32");
     ASSERT_EQ(ld.size(), 2u) << ptx;
     EXPECT_TRUE(isRegClass(ld[1].substr(1), "%r")) << ptx;
+}
+
+// -------------------------------------------------------------
+// Source locations and .file/.loc line info
+// -------------------------------------------------------------
+static const char* kLineInfoSrc =
+    "kernel t(int* o, int n) {\n"   // line 1
+    "    int i = thread_idx;\n"     // line 2
+    "    if (i < n) {\n"            // line 3
+    "        o[i] = 1;\n"           // line 4
+    "    }\n"                       // line 5
+    "}\n";                          // line 6
+
+static const IRInst* firstOp(const IRFunction& fn, IROp op) {
+    for (const auto& bb : fn.blocks)
+        for (const auto& inst : bb.instructions)
+            if (inst.op == op) return &inst;
+    return nullptr;
+}
+
+TEST(IRPassTest, InstructionsCarryTheirStatementLocation) {
+    auto fn = compileToIR(kLineInfoSrc);
+    const IRInst* tid = firstOp(fn, IROp::ReadSReg);
+    const IRInst* setp = firstOp(fn, IROp::SetpLt);
+    const IRInst* store = firstOp(fn, IROp::Store);
+    ASSERT_TRUE(tid && setp && store) << fn.dump();
+    EXPECT_EQ(tid->srcLoc, (SourceLocation{2, 5}));
+    EXPECT_EQ(setp->srcLoc, (SourceLocation{3, 5}));
+    EXPECT_EQ(store->srcLoc, (SourceLocation{4, 9}));
+
+    // The implicit ret at the end belongs to the kernel's closing brace, as with nvcc.
+    const IRInst& last = fn.blocks.back().instructions.back();
+    ASSERT_EQ(last.op, IROp::Ret);
+    EXPECT_EQ(last.srcLoc.line, 6u);
+}
+
+static std::string emitWithLineInfo(const std::string& src, const std::string& file) {
+    IRModule mod;
+    mod.functions.push_back(compileToIR(src));
+    PTXOptions opts;
+    opts.lineInfo = true;
+    opts.sourceFile = file;
+    return PTXEmitter(opts).emitModule(mod);
+}
+
+TEST(IRPassTest, LineInfoIsOffByDefault) {
+    IRModule mod;
+    mod.functions.push_back(compileToIR(kLineInfoSrc));
+    std::string ptx = PTXEmitter().emitModule(mod);
+    EXPECT_EQ(ptx.find(".file"), std::string::npos) << ptx;
+    EXPECT_EQ(ptx.find(".loc"), std::string::npos) << ptx;
+}
+
+TEST(IRPassTest, LineInfoEmitsFileAndLocDirectives) {
+    std::string ptx = emitWithLineInfo(kLineInfoSrc, "k.kern");
+
+    size_t file = ptx.find(".file 1 \"k.kern\"\n");
+    ASSERT_NE(file, std::string::npos) << ptx;
+    EXPECT_GT(file, ptx.find(".address_size 64"));
+    EXPECT_LT(file, ptx.find(".visible .entry t"));
+
+    // The store is preceded by the .loc of its statement, and that .loc is written once even
+    // though the statement lowers to several instructions.
+    size_t st = ptx.find("st.global.s32");
+    ASSERT_NE(st, std::string::npos) << ptx;
+    size_t loc = ptx.rfind(".loc ", st);
+    ASSERT_NE(loc, std::string::npos) << ptx;
+    EXPECT_EQ(ptx.substr(loc, ptx.find('\n', loc) - loc), ".loc 1 4 9") << ptx;
+    size_t count = 0;
+    for (size_t p = ptx.find(".loc 1 4 9\n"); p != std::string::npos; p = ptx.find(".loc 1 4 9\n", p + 1)) ++count;
+    EXPECT_EQ(count, 1u) << ptx;
+}
+
+TEST(IRPassTest, LineInfoEscapesFileName) {
+    // A Windows path's backslashes (and any quote) must be escaped inside the PTX string.
+    std::string ptx = emitWithLineInfo(kLineInfoSrc, "C:\\src\\a\"b.kern");
+    EXPECT_NE(ptx.find(".file 1 \"C:\\\\src\\\\a\\\"b.kern\"\n"), std::string::npos) << ptx;
 }
 
 TEST(IRPassTest, PTXEmissionValidStructure) {

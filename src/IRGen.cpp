@@ -33,7 +33,8 @@ IRFunction IRGen::emitKernel(const KernelDecl& kernel) {
     fn.addBlock("entry");
     enterScope();
 
-    // Load parameters in prologue
+    // Load parameters in prologue; attributed to the kernel's own line.
+    fn.currentLoc = kernel.range.begin;
     for (size_t i = 0; i < kernel.params.size(); ++i) {
         const auto& param = kernel.params[i];
         std::string paramPtxName = kernel.name + "_param_" + std::to_string(i);
@@ -43,12 +44,10 @@ IRFunction IRGen::emitKernel(const KernelDecl& kernel) {
             IRInst ldParam{IROp::LoadParam, rawReg, 0, 0, IRType::S64};
             ldParam.paramIndex = static_cast<int>(i);
             ldParam.paramName = paramPtxName;
-            ldParam.srcLoc = param.loc;
             fn.emit(ldParam);
 
             VReg baseReg = fn.freshReg(IRType::S64);
             IRInst cvta{IROp::CvtaGlobal, baseReg, rawReg, 0, IRType::S64};
-            cvta.srcLoc = param.loc;
             fn.emit(cvta);
 
             setVar(param.name, baseReg, param.type);
@@ -57,7 +56,6 @@ IRFunction IRGen::emitKernel(const KernelDecl& kernel) {
             IRInst ldParam{IROp::LoadParam, pReg, 0, 0, IRType::F32};
             ldParam.paramIndex = static_cast<int>(i);
             ldParam.paramName = paramPtxName;
-            ldParam.srcLoc = param.loc;
             fn.emit(ldParam);
 
             setVar(param.name, pReg, param.type);
@@ -66,7 +64,6 @@ IRFunction IRGen::emitKernel(const KernelDecl& kernel) {
             IRInst ldParam{IROp::LoadParam, pReg, 0, 0, IRType::S32};
             ldParam.paramIndex = static_cast<int>(i);
             ldParam.paramName = paramPtxName;
-            ldParam.srcLoc = param.loc;
             fn.emit(ldParam);
 
             setVar(param.name, pReg, param.type);
@@ -77,7 +74,8 @@ IRFunction IRGen::emitKernel(const KernelDecl& kernel) {
         emitStmt(*stmt, fn);
     }
 
-    // Ensure the last block has a ret
+    // Ensure the last block has a ret; like nvcc, it belongs to the closing brace.
+    fn.currentLoc = kernel.range.end;
     IRInst retInst{IROp::Ret, 0, 0, 0, IRType::S32};
     fn.emit(retInst);
 
@@ -86,6 +84,15 @@ IRFunction IRGen::emitKernel(const KernelDecl& kernel) {
 }
 
 void IRGen::emitStmt(const Stmt& stmt, IRFunction& fn) {
+    // Everything this statement emits is attributed to it. Nested statements set their own
+    // location and restore this one, so e.g. the branch that closes an `if` maps to the `if`.
+    SourceLocation outer = fn.currentLoc;
+    fn.currentLoc = stmt.range.begin;
+    emitStmtBody(stmt, fn);
+    fn.currentLoc = outer;
+}
+
+void IRGen::emitStmtBody(const Stmt& stmt, IRFunction& fn) {
     if (auto* varDecl = dynamic_cast<const VarDeclStmt*>(&stmt)) {
         emitVarDecl(*varDecl, fn);
     } else if (auto* assign = dynamic_cast<const AssignStmt*>(&stmt)) {
@@ -244,7 +251,10 @@ void IRGen::emitWhile(const WhileStmt& stmt, IRFunction& fn) {
     fn.emit(braLoop);
 
     fn.addBlock(condLabel);
+    SourceLocation loopLoc = fn.currentLoc;
+    fn.currentLoc = stmt.cond->range.begin;
     emitCondition(*stmt.cond, bodyLabel, endLabel, fn);
+    fn.currentLoc = loopLoc;
 
     fn.addBlock(endLabel);
 }
@@ -274,7 +284,11 @@ void IRGen::emitFor(const ForStmt& stmt, IRFunction& fn) {
 
     fn.addBlock(condLabel);
     if (stmt.cond) {
+        // The condition is emitted after the body, so give it its own location back.
+        SourceLocation loopLoc = fn.currentLoc;
+        fn.currentLoc = stmt.cond->range.begin;
         emitCondition(*stmt.cond, bodyLabel, endLabel, fn);
+        fn.currentLoc = loopLoc;
     } else {
         IRInst braInf{IROp::Bra, 0, 0, 0, IRType::S32};
         braInf.trueTarget = bodyLabel;

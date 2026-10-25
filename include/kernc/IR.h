@@ -143,11 +143,15 @@ struct IRFunction {
         blocks.push_back(BasicBlock{label, {}});
     }
 
+    // Source location stamped on every emitted instruction; IRGen sets it per statement.
+    SourceLocation currentLoc;
+
     void emit(const IRInst& inst) {
         if (blocks.empty()) {
             addBlock("entry");
         }
         blocks.back().instructions.push_back(inst);
+        blocks.back().instructions.back().srcLoc = currentLoc;
     }
 
     std::string dump() const;

@@ -15,6 +15,7 @@ void printUsage(const char* progName) {
               << "  -o <file>        Output PTX file (defaults to stdout)\n"
               << "  -O0              Disable optimizations\n"
               << "  -O1              Enable optimizations (default)\n"
+              << "  -lineinfo        Emit .file/.loc source line info (also --generate-line-info)\n"
               << "  --dump-tokens    Print token stream\n"
               << "  --dump-ir        Print unoptimized IR\n"
               << "  --dump-opt-ir    Print optimized IR\n"
@@ -28,6 +29,7 @@ int main(int argc, char** argv) {
     bool dumpTokens = false;
     bool dumpIR = false;
     bool dumpOptIR = false;
+    bool lineInfo = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -37,6 +39,8 @@ int main(int argc, char** argv) {
             optimize = false;
         } else if (arg == "-O1") {
             optimize = true;
+        } else if (arg == "-lineinfo" || arg == "--generate-line-info") {
+            lineInfo = true;
         } else if (arg == "--dump-tokens") {
             dumpTokens = true;
         } else if (arg == "--dump-ir") {
@@ -121,7 +125,10 @@ int main(int argc, char** argv) {
     }
 
     // 5. PTX Emission
-    kernc::PTXEmitter emitter;
+    kernc::PTXOptions ptxOptions;
+    ptxOptions.lineInfo = lineInfo;
+    ptxOptions.sourceFile = inputFile;
+    kernc::PTXEmitter emitter(ptxOptions);
     std::string ptx = emitter.emitModule(irModule);
 
     if (!outputFile.empty() && outputFile != "-") {

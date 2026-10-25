@@ -30,3 +30,17 @@ The IR is a non-SSA 3-address virtual-register code organized into Basic Blocks 
 
 5. **Float Literals in PTX**:
    - Emits IEEE-754 bit representations as hex literals `0fXXXXXXXX` (e.g., `0f00000000` for `0.0f`).
+
+6. **Source Line Info (`-lineinfo`)**:
+   - Every IR instruction carries the source location of the statement that produced it.
+     IRGen sets `IRFunction::currentLoc` per statement and restores it afterwards, so the
+     branches closing an `if`/loop map to that statement. Loop conditions (emitted after the
+     body) map to the condition expression. The parameter prologue maps to the `kernel` line
+     and the final `ret` to the closing brace, as with nvcc.
+   - With `-lineinfo` (or `--generate-line-info`), the emitter writes `.file 1 "<input>"` once
+     and a `.loc 1 <line> <column>` whenever the location changes. A `.loc` applies to the
+     instructions that follow it in the text, so labels do not reset it.
+   - ptxas turns these into the cubin's `.nv_debug_line_sass` table, which nvdisasm,
+     cuda-gdb, compute-sanitizer and Nsight use to map SASS back to `.kern` lines. Like nvcc's
+     `-lineinfo` (and unlike `-G`), this does not disable optimization. Off by default; without
+     it the PTX is unchanged.

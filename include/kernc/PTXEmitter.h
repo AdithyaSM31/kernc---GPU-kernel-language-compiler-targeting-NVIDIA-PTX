@@ -6,9 +6,14 @@
 
 namespace kernc {
 
+struct PTXOptions {
+    bool lineInfo = false;  // emit .file/.loc source line info (like nvcc -lineinfo)
+    std::string sourceFile; // file name recorded by the .file directive
+};
+
 class PTXEmitter {
 public:
-    PTXEmitter() = default;
+    explicit PTXEmitter(PTXOptions options = {}) : options_(std::move(options)) {}
 
     std::string emitModule(const IRModule& mod);
     std::string emitFunction(const IRFunction& fn);
@@ -26,6 +31,8 @@ private:
     };
 
     std::string formatFloatHex(float val) const;
+
+    PTXOptions options_;
 };
 
 } // namespace kernc

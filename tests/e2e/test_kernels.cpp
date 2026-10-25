@@ -74,7 +74,8 @@ CUdevice CudaEnvironment::device = 0;
 CUcontext CudaEnvironment::context = nullptr;
 bool CudaEnvironment::available = false;
 
-static std::string compileSourceToPTX(const std::string& src, bool optimize = true) {
+static std::string compileSourceToPTX(const std::string& src, bool optimize = true,
+                                      const PTXOptions& ptxOptions = {}) {
     DiagnosticsEngine diag;
     Lexer lexer(src, &diag);
     Parser parser(lexer, diag);
@@ -92,7 +93,7 @@ static std::string compileSourceToPTX(const std::string& src, bool optimize = tr
         Optimizer::runPasses(irMod);
     }
 
-    PTXEmitter emitter;
+    PTXEmitter emitter(ptxOptions);
     return emitter.emitModule(irMod);
 }
 
@@ -706,6 +707,53 @@ TEST_F(KernelE2ETest, ReductionExampleMatchesCpu) {
         }
         CHECK_CUDA(cuModuleUnload(mod));
     }
+}
+
+// -------------------------------------------------------------
+// Line info
+// -------------------------------------------------------------
+// PTX with .file/.loc must JIT with CU_JIT_GENERATE_LINE_INFO and still compute correctly.
+TEST_F(KernelE2ETest, LineInfoPTXJitsAndRuns) {
+    std::string src = readFile(std::string(KERNC_EXAMPLES_DIR) + "/saxpy.kern");
+    ASSERT_FALSE(src.empty());
+    PTXOptions opts;
+    opts.lineInfo = true;
+    opts.sourceFile = "saxpy.kern";
+    std::string ptx = compileSourceToPTX(src, true, opts);
+    ASSERT_NE(ptx.find(".loc 1 "), std::string::npos) << ptx;
+
+    CUmodule mod;
+    char errorLog[4096] = {0};
+    CUjit_option options[] = { CU_JIT_GENERATE_LINE_INFO, CU_JIT_ERROR_LOG_BUFFER,
+                               CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES };
+    void* values[] = { (void*)(uintptr_t)1, (void*)errorLog, (void*)(uintptr_t)sizeof(errorLog) };
+    ASSERT_EQ(cuModuleLoadDataEx(&mod, ptx.c_str(), 3, options, values), CUDA_SUCCESS) << errorLog;
+    CUfunction func;
+    CHECK_CUDA(cuModuleGetFunction(&func, mod, "saxpy"));
+
+    int n = 1000;
+    float a = 1.5f;
+    std::vector<float> h_x(n), h_y(n), h_y0(n);
+    for (int k = 0; k < n; ++k) {
+        h_x[k] = 0.25f * k;
+        h_y[k] = h_y0[k] = 3.0f - k;
+    }
+    CUdeviceptr d_x, d_y;
+    CHECK_CUDA(cuMemAlloc(&d_x, n * sizeof(float)));
+    CHECK_CUDA(cuMemAlloc(&d_y, n * sizeof(float)));
+    CHECK_CUDA(cuMemcpyHtoD(d_x, h_x.data(), n * sizeof(float)));
+    CHECK_CUDA(cuMemcpyHtoD(d_y, h_y.data(), n * sizeof(float)));
+    void* args[] = { &a, &d_x, &d_y, &n };
+    CHECK_CUDA(cuLaunchKernel(func, (n + 255) / 256, 1, 1, 256, 1, 1, 0, 0, args, 0));
+    CHECK_CUDA(cuCtxSynchronize());
+    CHECK_CUDA(cuMemcpyDtoH(h_y.data(), d_y, n * sizeof(float)));
+    for (int k = 0; k < n; ++k) {
+        ASSERT_NEAR(h_y[k], a * h_x[k] + h_y0[k], 1e-4f * std::max(1.0f, std::fabs(h_y[k])))
+            << "index " << k;
+    }
+    CHECK_CUDA(cuMemFree(d_x));
+    CHECK_CUDA(cuMemFree(d_y));
+    CHECK_CUDA(cuModuleUnload(mod));
 }
 
 // -------------------------------------------------------------

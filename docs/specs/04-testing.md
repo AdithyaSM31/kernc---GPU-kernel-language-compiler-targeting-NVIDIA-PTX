@@ -36,3 +36,13 @@
     - `clamp`: Branching clamping within $[min, max]$.
     - `relu`: Branching ReLU $\max(0, x)$.
   - Verifies exact or epsilon-bound match against CPU reference implementation.
+
+### 5. Line-Table Tests (`kernc -lineinfo` → ptxas → `nvdisasm --print-line-info`)
+- `tests/lineinfo/*.kern` are annotated with trailing `//@ REGEX` comments; the SASS that
+  ptxas attributes to that line must include an instruction matching REGEX (e.g. `//@ STG`
+  on a global store, `//@ BAR` on `barrier()`).
+- `tests/lineinfo/check_lineinfo.py` also requires that no SASS is attributed to a blank or
+  comment-only line, and that the line table names the `.kern` file.
+- Run at `-O0` and `-O1`. Unit tests cover the per-instruction locations, the `.file`/`.loc`
+  text and file-name escaping; a GPU test JIT-loads line-info PTX with
+  `CU_JIT_GENERATE_LINE_INFO` and checks the results.

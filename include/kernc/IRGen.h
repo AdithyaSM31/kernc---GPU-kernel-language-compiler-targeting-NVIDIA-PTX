@@ -17,6 +17,7 @@ public:
 
 private:
     void emitStmt(const Stmt& stmt, IRFunction& fn);
+    void emitStmtBody(const Stmt& stmt, IRFunction& fn);
     void emitVarDecl(const VarDeclStmt& stmt, IRFunction& fn);
     void emitAssign(const AssignStmt& stmt, IRFunction& fn);
     void emitIf(const IfStmt& stmt, IRFunction& fn);

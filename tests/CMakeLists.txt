@@ -55,3 +55,22 @@ if (PTXAS_BIN)
         endforeach()
     endforeach()
 endif()
+
+# 5. Line-table tests: kernc -lineinfo -> ptxas -> nvdisasm --print-line-info must attribute the
+#    expected SASS instructions to each annotated source line.
+find_program(NVDISASM_BIN nvdisasm PATHS /usr/local/cuda-13.0/bin /usr/local/cuda/bin)
+if (PTXAS_BIN AND NVDISASM_BIN)
+    file(GLOB LINEINFO_KERNELS "${CMAKE_CURRENT_SOURCE_DIR}/lineinfo/*.kern")
+    foreach(KERN_SRC ${LINEINFO_KERNELS})
+        get_filename_component(kern ${KERN_SRC} NAME_WE)
+        foreach(opt O0 O1)
+            add_test(NAME lineinfo_${kern}_${opt}
+                COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/lineinfo/check_lineinfo.py
+                        $<TARGET_FILE:kernc> ${PTXAS_BIN} ${NVDISASM_BIN} ${KERN_SRC}
+                        ${CMAKE_CURRENT_BINARY_DIR}/lineinfo -${opt}
+            )
+        endforeach()
+    endforeach()
+else()
+    message(WARNING "nvdisasm not found. Line-table tests will be disabled.")
+endif()

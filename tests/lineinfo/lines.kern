@@ -1,0 +1,18 @@
+// Line-table test. A trailing "//@ REGEX" comment on a code line means: after kernc -lineinfo,
+// ptxas and nvdisasm --print-line-info, some SASS instruction matching REGEX must be
+// attributed to that source line. Every attributed line must also be a line that has code.
+kernel lines(float* x, float* y, int n) {
+    shared float tile[128];
+    int i = block_idx * block_dim + thread_idx;   //@ S2R .*SR_TID\.X
+    float acc = 0.0;
+    if (i < n) {                                  //@ ISETP
+        tile[thread_idx % 128] = x[i];            //@ STS
+    }
+    barrier();                                    //@ BAR
+    for (int k = 0; k < 4; k = k + 1) {
+        acc = acc + tile[(thread_idx + k) % 128]; //@ LDS
+    }
+    if (i < n) {
+        y[i] = acc;                               //@ STG
+    }
+}
