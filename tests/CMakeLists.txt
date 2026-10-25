@@ -41,4 +41,16 @@ if (PTXAS_BIN)
             COMMAND bash -c "\"$<TARGET_FILE:kernc>\" \"${KERN_SRC}\" -o \"${OUT_PTX}\" && \"${PTXAS_BIN}\" -arch=sm_86 \"${OUT_PTX}\" -o \"${OUT_CUBIN}\""
         )
     endforeach()
+
+    # Regression kernels: compiled at both -O0 and -O1 so the optimizer cannot hide a codegen bug.
+    file(GLOB REGRESS_KERNELS "${CMAKE_CURRENT_SOURCE_DIR}/regress/*.kern")
+    foreach(KERN_SRC ${REGRESS_KERNELS})
+        get_filename_component(kern ${KERN_SRC} NAME_WE)
+        foreach(opt O0 O1)
+            set(OUT_PTX "${PTX_TEST_DIR}/regress_${kern}_${opt}.ptx")
+            add_test(NAME ptx_regress_${kern}_${opt}
+                COMMAND bash -c "\"$<TARGET_FILE:kernc>\" \"${KERN_SRC}\" -${opt} -o \"${OUT_PTX}\" && \"${PTXAS_BIN}\" -arch=sm_86 \"${OUT_PTX}\" -o /dev/null"
+            )
+        endforeach()
+    endforeach()
 endif()

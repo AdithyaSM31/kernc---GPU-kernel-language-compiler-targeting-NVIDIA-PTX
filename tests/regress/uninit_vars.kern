@@ -1,0 +1,8 @@
+// Regression: variables whose first use is not a definition must keep their declared
+// PTX register class (previously emitted as %p / %rd and rejected by ptxas).
+kernel uninit_vars(int* out, float* fout, int n) {
+    int j;
+    float s;
+    if (j < n) { out[j] = 1; }
+    if (s < 1.0) { fout[0] = s; }
+}

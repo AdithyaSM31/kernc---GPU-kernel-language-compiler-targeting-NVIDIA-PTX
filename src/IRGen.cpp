@@ -2,6 +2,18 @@
 
 namespace kernc {
 
+// Maps a source-language type to the IR register type that holds its values.
+static IRType toIRType(const Type& t) {
+    switch (t.kind) {
+        case Type::Float: return IRType::F32;
+        case Type::Ptr:   return IRType::S64;
+        case Type::Pred:  return IRType::Pred;
+        case Type::Int:
+        case Type::Void:  break;
+    }
+    return IRType::S32;
+}
+
 IRGen::IRGen(DiagnosticsEngine& diag) : diag_(diag) {}
 
 IRModule IRGen::emitModule(const Program& program) {
@@ -26,21 +38,21 @@ IRFunction IRGen::emitKernel(const KernelDecl& kernel) {
         std::string paramPtxName = kernel.name + "_param_" + std::to_string(i);
 
         if (param.type.isPtr()) {
-            VReg rawReg = fn.freshReg();
+            VReg rawReg = fn.freshReg(IRType::S64);
             IRInst ldParam{IROp::LoadParam, rawReg, 0, 0, IRType::S64};
             ldParam.paramIndex = static_cast<int>(i);
             ldParam.paramName = paramPtxName;
             ldParam.srcLoc = param.loc;
             fn.emit(ldParam);
 
-            VReg baseReg = fn.freshReg();
+            VReg baseReg = fn.freshReg(IRType::S64);
             IRInst cvta{IROp::CvtaGlobal, baseReg, rawReg, 0, IRType::S64};
             cvta.srcLoc = param.loc;
             fn.emit(cvta);
 
             setVar(param.name, baseReg, param.type);
         } else if (param.type.isFloat()) {
-            VReg pReg = fn.freshReg();
+            VReg pReg = fn.freshReg(IRType::F32);
             IRInst ldParam{IROp::LoadParam, pReg, 0, 0, IRType::F32};
             ldParam.paramIndex = static_cast<int>(i);
             ldParam.paramName = paramPtxName;
@@ -49,7 +61,7 @@ IRFunction IRGen::emitKernel(const KernelDecl& kernel) {
 
             setVar(param.name, pReg, param.type);
         } else {
-            VReg pReg = fn.freshReg();
+            VReg pReg = fn.freshReg(IRType::S32);
             IRInst ldParam{IROp::LoadParam, pReg, 0, 0, IRType::S32};
             ldParam.paramIndex = static_cast<int>(i);
             ldParam.paramName = paramPtxName;
@@ -93,13 +105,13 @@ void IRGen::emitStmt(const Stmt& stmt, IRFunction& fn) {
 }
 
 void IRGen::emitVarDecl(const VarDeclStmt& stmt, IRFunction& fn) {
-    VReg varReg = fn.freshReg();
+    VReg varReg = fn.freshReg(toIRType(stmt.type));
     setVar(stmt.name, varReg, stmt.type);
 
     if (stmt.init) {
         VReg valReg = emitExpr(*stmt.init, fn);
         if (stmt.type.isFloat() && stmt.init->resolvedType.isInt()) {
-            VReg cvtReg = fn.freshReg();
+            VReg cvtReg = fn.freshReg(IRType::F32);
             fn.emit(IRInst{IROp::CvtI2F, cvtReg, valReg, 0, IRType::F32});
             valReg = cvtReg;
         }
@@ -113,7 +125,7 @@ void IRGen::emitAssign(const AssignStmt& stmt, IRFunction& fn) {
         const VarInfo* vInfo = getVar(ident->name);
         VReg valReg = emitExpr(*stmt.value, fn);
         if (vInfo->type.isFloat() && stmt.value->resolvedType.isInt()) {
-            VReg cvtReg = fn.freshReg();
+            VReg cvtReg = fn.freshReg(IRType::F32);
             fn.emit(IRInst{IROp::CvtI2F, cvtReg, valReg, 0, IRType::F32});
             valReg = cvtReg;
         }
@@ -124,20 +136,20 @@ void IRGen::emitAssign(const AssignStmt& stmt, IRFunction& fn) {
         const VarInfo* baseInfo = getVar(baseIdent->name);
 
         VReg idxReg = emitExpr(*idx->index, fn);
-        VReg szReg = fn.freshReg();
+        VReg szReg = fn.freshReg(IRType::S32);
         IRInst ldimm{IROp::LoadImm, szReg, 0, 0, IRType::S32};
         ldimm.immInt = 4;
         fn.emit(ldimm);
 
-        VReg offReg = fn.freshReg();
+        VReg offReg = fn.freshReg(IRType::S64);
         fn.emit(IRInst{IROp::MulWide, offReg, idxReg, szReg, IRType::S64});
 
-        VReg addrReg = fn.freshReg();
+        VReg addrReg = fn.freshReg(IRType::S64);
         fn.emit(IRInst{IROp::AddS64, addrReg, baseInfo->reg, offReg, IRType::S64});
 
         VReg valReg = emitExpr(*stmt.value, fn);
         if (baseInfo->type.pointeeKind == Type::Float && stmt.value->resolvedType.isInt()) {
-            VReg cvtReg = fn.freshReg();
+            VReg cvtReg = fn.freshReg(IRType::F32);
             fn.emit(IRInst{IROp::CvtI2F, cvtReg, valReg, 0, IRType::F32});
             valReg = cvtReg;
         }
@@ -260,12 +272,12 @@ void IRGen::emitCondition(const Expr& cond, const Label& trueLabel, const Label&
         if (bin->lhs->resolvedType.isFloat() || bin->rhs->resolvedType.isFloat()) {
             isFloat = true;
             if (bin->lhs->resolvedType.isInt()) {
-                VReg cvt = fn.freshReg();
+                VReg cvt = fn.freshReg(IRType::F32);
                 fn.emit(IRInst{IROp::CvtI2F, cvt, r1, 0, IRType::F32});
                 r1 = cvt;
             }
             if (bin->rhs->resolvedType.isInt()) {
-                VReg cvt = fn.freshReg();
+                VReg cvt = fn.freshReg(IRType::F32);
                 fn.emit(IRInst{IROp::CvtI2F, cvt, r2, 0, IRType::F32});
                 r2 = cvt;
             }
@@ -294,7 +306,7 @@ void IRGen::emitCondition(const Expr& cond, const Label& trueLabel, const Label&
             }
         }
 
-        VReg pred = fn.freshReg();
+        VReg pred = fn.freshReg(IRType::Pred);
         fn.emit(IRInst{setpOp, pred, r1, r2, IRType::Pred});
 
         IRInst braCond{IROp::BraCond, 0, pred, 0, IRType::Pred};
@@ -313,12 +325,12 @@ void IRGen::emitCondition(const Expr& cond, const Label& trueLabel, const Label&
 
     // General scalar expression as condition
     VReg r = emitExpr(cond, fn);
-    VReg zero = fn.freshReg();
+    VReg zero = fn.freshReg(IRType::S32);
     IRInst ldimm{IROp::LoadImm, zero, 0, 0, IRType::S32};
     ldimm.immInt = 0;
     fn.emit(ldimm);
 
-    VReg pred = fn.freshReg();
+    VReg pred = fn.freshReg(IRType::Pred);
     fn.emit(IRInst{IROp::SetpNe, pred, r, zero, IRType::Pred});
 
     IRInst braCond{IROp::BraCond, 0, pred, 0, IRType::Pred};
@@ -329,14 +341,14 @@ void IRGen::emitCondition(const Expr& cond, const Label& trueLabel, const Label&
 
 VReg IRGen::emitExpr(const Expr& expr, IRFunction& fn) {
     if (auto* intLit = dynamic_cast<const IntLiteralExpr*>(&expr)) {
-        VReg r = fn.freshReg();
+        VReg r = fn.freshReg(IRType::S32);
         IRInst inst{IROp::LoadImm, r, 0, 0, IRType::S32};
         inst.immInt = static_cast<int32_t>(intLit->value);
         fn.emit(inst);
         return r;
     }
     if (auto* floatLit = dynamic_cast<const FloatLiteralExpr*>(&expr)) {
-        VReg r = fn.freshReg();
+        VReg r = fn.freshReg(IRType::F32);
         IRInst inst{IROp::LoadImm, r, 0, 0, IRType::F32};
         inst.immFloat = static_cast<float>(floatLit->value);
         fn.emit(inst);
@@ -365,7 +377,7 @@ VReg IRGen::emitExpr(const Expr& expr, IRFunction& fn) {
 }
 
 VReg IRGen::emitBuiltin(const BuiltinExpr& expr, IRFunction& fn) {
-    VReg r = fn.freshReg();
+    VReg r = fn.freshReg(IRType::S32);
     IRInst inst{IROp::ReadSReg, r, 0, 0, IRType::S32};
     switch (expr.builtin) {
         case BuiltinKind::ThreadIdx: inst.specialReg = "%tid.x"; break;
@@ -383,20 +395,20 @@ VReg IRGen::emitBinaryExpr(const BinaryExpr& expr, IRFunction& fn) {
     bool isFloat = (expr.resolvedType.isFloat());
     if (isFloat) {
         if (expr.lhs->resolvedType.isInt()) {
-            VReg cvt = fn.freshReg();
+            VReg cvt = fn.freshReg(IRType::F32);
             fn.emit(IRInst{IROp::CvtI2F, cvt, r1, 0, IRType::F32});
             r1 = cvt;
         }
         if (expr.rhs->resolvedType.isInt()) {
-            VReg cvt = fn.freshReg();
+            VReg cvt = fn.freshReg(IRType::F32);
             fn.emit(IRInst{IROp::CvtI2F, cvt, r2, 0, IRType::F32});
             r2 = cvt;
         }
     }
 
-    VReg dst = fn.freshReg();
-    IROp op;
     IRType t = isFloat ? IRType::F32 : IRType::S32;
+    VReg dst = fn.freshReg(t);
+    IROp op;
 
     if (isFloat) {
         switch (expr.op) {
@@ -423,7 +435,7 @@ VReg IRGen::emitBinaryExpr(const BinaryExpr& expr, IRFunction& fn) {
 
 VReg IRGen::emitUnaryExpr(const UnaryExpr& expr, IRFunction& fn) {
     VReg sub = emitExpr(*expr.operand, fn);
-    VReg dst = fn.freshReg();
+    VReg dst = fn.freshReg(toIRType(expr.resolvedType));
     if (expr.op == UnaryOp::Neg) {
         if (expr.resolvedType.isFloat()) {
             fn.emit(IRInst{IROp::FNeg, dst, sub, 0, IRType::F32});
@@ -439,26 +451,26 @@ VReg IRGen::emitIndexExpr(const IndexExpr& expr, IRFunction& fn) {
     const VarInfo* baseInfo = getVar(baseIdent->name);
 
     VReg idxReg = emitExpr(*expr.index, fn);
-    VReg szReg = fn.freshReg();
+    VReg szReg = fn.freshReg(IRType::S32);
     IRInst ldimm{IROp::LoadImm, szReg, 0, 0, IRType::S32};
     ldimm.immInt = 4;
     fn.emit(ldimm);
 
-    VReg offReg = fn.freshReg();
+    VReg offReg = fn.freshReg(IRType::S64);
     fn.emit(IRInst{IROp::MulWide, offReg, idxReg, szReg, IRType::S64});
 
-    VReg addrReg = fn.freshReg();
+    VReg addrReg = fn.freshReg(IRType::S64);
     fn.emit(IRInst{IROp::AddS64, addrReg, baseInfo->reg, offReg, IRType::S64});
 
-    VReg dstReg = fn.freshReg();
     IRType loadType = (baseInfo->type.pointeeKind == Type::Float ? IRType::F32 : IRType::S32);
+    VReg dstReg = fn.freshReg(loadType);
     fn.emit(IRInst{IROp::Load, dstReg, addrReg, 0, loadType});
     return dstReg;
 }
 
 VReg IRGen::emitCastExpr(const CastExpr& expr, IRFunction& fn) {
     VReg sub = emitExpr(*expr.operand, fn);
-    VReg dst = fn.freshReg();
+    VReg dst = fn.freshReg(toIRType(expr.targetType));
     if (expr.targetType.isFloat() && expr.operand->resolvedType.isInt()) {
         fn.emit(IRInst{IROp::CvtI2F, dst, sub, 0, IRType::F32});
     } else if (expr.targetType.isInt() && expr.operand->resolvedType.isFloat()) {

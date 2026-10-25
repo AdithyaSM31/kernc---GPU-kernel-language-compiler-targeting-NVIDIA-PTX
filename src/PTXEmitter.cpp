@@ -64,28 +64,14 @@ std::string PTXEmitter::emitModule(const IRModule& mod) {
 std::string PTXEmitter::emitFunction(const IRFunction& fn) {
     RegAllocator alloc;
 
-    // Pass 1: Pre-allocate all registers to know counts
+    // Pass 1: Pre-allocate all registers to know counts. Each register's PTX class comes
+    // from the type IRGen recorded when it was created, never from the instruction using it.
     for (const auto& bb : fn.blocks) {
         for (const auto& inst : bb.instructions) {
-            if (inst.dst != 0) {
-                alloc.getOrAlloc(inst.dst, inst.type);
-            }
-            if (inst.src1 != 0) {
-                // If src1 was not allocated as dst, determine type
-                IRType srcType = inst.type;
-                if (inst.op == IROp::CvtI2F) srcType = IRType::S32;
-                else if (inst.op == IROp::CvtF2I) srcType = IRType::F32;
-                else if (inst.op == IROp::CvtaGlobal || inst.op == IROp::Load || inst.op == IROp::Store) {
-                    if (inst.op == IROp::Load || inst.op == IROp::Store) srcType = IRType::S64; // addr is S64
+            for (VReg reg : {inst.dst, inst.src1, inst.src2}) {
+                if (reg != 0) {
+                    alloc.getOrAlloc(reg, fn.regType(reg));
                 }
-                alloc.getOrAlloc(inst.src1, srcType);
-            }
-            if (inst.src2 != 0) {
-                IRType src2Type = inst.type;
-                if (inst.op == IROp::MulWide) src2Type = IRType::S32;
-                else if (inst.op == IROp::AddS64) src2Type = IRType::S64;
-                else if (inst.op == IROp::Store) src2Type = inst.type; // store value
-                alloc.getOrAlloc(inst.src2, src2Type);
             }
         }
     }

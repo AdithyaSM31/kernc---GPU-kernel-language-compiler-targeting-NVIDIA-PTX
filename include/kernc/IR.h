@@ -93,8 +93,17 @@ struct IRFunction {
     uint32_t nextVReg = 1;
     uint32_t nextLabel = 0;
 
-    VReg freshReg() {
+    // Type of each virtual register, indexed by VReg. Slot 0 is the "no register" sentinel.
+    // A register's type is fixed when it is created; PTX declares registers per type.
+    std::vector<IRType> regTypes{IRType::S32};
+
+    VReg freshReg(IRType type) {
+        regTypes.push_back(type);
         return nextVReg++;
+    }
+
+    IRType regType(VReg reg) const {
+        return regTypes.at(reg);
     }
 
     Label freshLabel(const std::string& hint = "L") {
