@@ -1,169 +1,14 @@
-# `kernc` — Standalone GPU Kernel Compiler targeting NVIDIA PTX (`sm_86`)
+# kernc: a GPU kernel compiler targeting NVIDIA PTX (sm_86)
 
-[![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B17)
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
 [![CUDA](https://img.shields.io/badge/CUDA-13.0-green.svg)](https://developer.nvidia.com/cuda-toolkit)
 [![Target](https://img.shields.io/badge/PTX-sm__86-orange.svg)](https://docs.nvidia.com/cuda/parallel-thread-execution/)
 
-`kernc` is a standalone C++17 compiler for a domain-specific GPU kernel language (`.kern`) targeting NVIDIA PTX (`sm_86`, Ampere architecture). It features a complete compilation pipeline from front-end lexing and recursive-descent parsing with precedence climbing, through semantic analysis, 3-address control-flow graph (CFG) IR lowering, optimization passes (constant folding, algebraic simplification, dead code elimination), to clean PTX code emission.
+`kernc` is a compiler, written in C++17, for a small C-like GPU kernel language (`.kern`
+files). It emits PTX that `ptxas -arch=sm_86` accepts, and the test suite runs that PTX on an
+NVIDIA GeForce RTX 3060 Laptop GPU through the CUDA Driver API, checking every result against a
+CPU reference.
 
-The compiler also includes an automated test suite featuring **unit tests**, **file-based diagnostic tests**, **`ptxas` assembler validation**, and **hardware end-to-end execution tests** using the CUDA Driver API on an NVIDIA GeForce RTX 3060 Laptop GPU.
-
----
-
-## Architecture Overview
-
-```
-                      ┌────────────────────────┐
-                      │    .kern Source File   │
-                      └───────────┬────────────┘
-                                  │
-                                  ▼
-                      ┌────────────────────────┐
-                      │      Lexer (C++17)     │
-                      │  (Zero-copy, Locs)     │
-                      └───────────┬────────────┘
-                                  │ Token Stream
-                                  ▼
-                      ┌────────────────────────┐
-                      │   Parser (Precedence   │
-                      │        Climbing)       │
-                      └───────────┬────────────┘
-                                  │ AST (unique_ptr)
-                                  ▼
-                      ┌────────────────────────┐
-                      │    Semantic Analysis   │
-                      │  (Scoping, Line:Col)   │
-                      └───────────┬────────────┘
-                                  │ Validated AST
-                                  ▼
-                      ┌────────────────────────┐
-                      │      IR Lowering       │
-                      │ (Branch Threading CFG) │
-                      └───────────┬────────────┘
-                                  │ 3-Address IR
-                                  ▼
-                      ┌────────────────────────┐
-                      │   Optimization Passes  │
-                      │  (ConstFold, DCE)      │
-                      └───────────┬────────────┘
-                                  │ Optimized IR
-                                  ▼
-                      ┌────────────────────────┐
-                      │      PTX Emitter       │
-                      │   (sm_86, Hex Floats)  │
-                      └───────────┬────────────┘
-                                  │
-                                  ▼
-                      ┌────────────────────────┐
-                      │   .ptx Output File     │
-                      └───────────┬────────────┘
-                                  │
-          ┌───────────────────────┴───────────────────────┐
-          │                                               │
-          ▼                                               ▼
-┌──────────────────┐                            ┌──────────────────┐
-│  ptxas sm_86     │                            │ CUDA Driver API  │
-│  Validation      │                            │ E2E GPU Runner   │
-└──────────────────┘                            └──────────────────┘
-```
-
----
-
-## Directory Structure
-
-```
-kernc/
-├── CMakeLists.txt                 # Top-level CMake configuration
-├── README.md                      # Architecture and documentation
-├── docs/                          # Detailed architecture specifications
-│   └── specs/
-│       ├── 01-scope.md
-│       ├── 02-architecture.md
-│       ├── 03-ir-and-codegen.md
-│       └── 04-testing.md
-├── include/kernc/                 # Public C++ headers
-│   ├── SourceLocation.h           # Source location & range tracking
-│   ├── Diagnostics.h              # Diagnostic engine with caret reporting
-│   ├── Token.h                    # Token kinds & representations
-│   ├── Lexer.h                    # Zero-copy string_view lexer
-│   ├── AST.h                      # AST node hierarchy (unique_ptr)
-│   ├── Parser.h                   # Precedence climbing parser
-│   ├── Sema.h                     # Semantic analyzer & symbol table
-│   ├── IR.h                       # 3-address CFG IR instructions & types
-│   ├── IRGen.h                    # AST to IR lowering engine
-│   ├── Passes.h                   # Constant folding & DCE passes
-│   └── PTXEmitter.h               # PTX code generation targeting sm_86
-├── src/                           # Compiler implementation
-│   ├── Diagnostics.cpp
-│   ├── Lexer.cpp
-│   ├── AST.cpp
-│   ├── Parser.cpp
-│   ├── Sema.cpp
-│   ├── IR.cpp
-│   ├── IRGen.cpp
-│   ├── Passes.cpp
-│   ├── PTXEmitter.cpp
-│   └── main.cpp                   # kernc CLI compiler driver
-├── examples/                      # Example GPU kernels
-│   ├── vecadd.kern                # Vector addition (int)
-│   ├── saxpy.kern                 # SAXPY (float)
-│   ├── clamp.kern                 # Range clamping with branching (float)
-│   └── relu.kern                  # ReLU with branching (float)
-├── tests/                         # Comprehensive test suite
-│   ├── CMakeLists.txt
-│   ├── unit/                      # GoogleTest unit tests
-│   │   ├── lexer_test.cpp
-│   │   ├── parser_test.cpp
-│   │   ├── sema_test.cpp
-│   │   └── ir_pass_test.cpp
-│   ├── diagnostic/                # Negative expected-error tests
-│   │   ├── err_undeclared.kern
-│   │   ├── err_redeclared.kern
-│   │   ├── err_type_mismatch.kern
-│   │   ├── err_invalid_index.kern
-│   │   ├── err_bad_cast.kern
-│   │   ├── err_assign_builtin.kern
-│   │   └── run_diagnostic_tests.py
-│   └── e2e/                       # Hardware GPU execution tests
-│       └── test_kernels.cpp       # CUDA Driver API runner
-└── tools/
-    └── runner/                    # Standalone CLI PTX execution tool
-        └── runner.cpp
-```
-
----
-
-## Key Technical Decisions & Interview Talking Points
-
-### 1. Non-SSA 3-Address IR
-- **Rationale**: PTX itself operates on virtual registers (`%r`, `%f`, `%rd`, `%p`) with an infinite register assumption. `ptxas` (NVIDIA's PTX optimizing assembler) performs its own internal SSA construction, dominance frontier analysis, instruction scheduling, and physical register allocation.
-- **Benefit**: Retaining a non-SSA 3-address IR in `kernc` eliminates unnecessary dominance-frontier computation and subsequent out-of-SSA phi-elimination passes without sacrificing any downstream performance.
-
-### 2. Branch Threading for Short-Circuit `&&` / `||`
-- Rather than materializing boolean integer temporaries (`0` or `1`) with `selp`, conditions with `&&` and `||` use direct **branch threading** (`emitCondition`).
-- `a && b` evaluates `a`; if false, it branches directly to `L_false`; if true, it falls through to evaluate `b`. This mirrors Clang/LLVM and GCC lowering, producing fewer register allocations and clean branch structures.
-
-### 3. Address Arithmetic with `mul.wide.s32`
-- In PTX 64-bit address mode (`.address_size 64`), memory indexing requires 64-bit effective addresses.
-- Array indexing `ptr[i]` multiplies the 32-bit index `%r_i` with the 32-bit element size (4 bytes) using `mul.wide.s32 %rd_off, %r_i, %r_sz;` directly into a 64-bit register `%rd_off`, followed by `add.s64` to the base pointer. This matches the exact instruction sequence generated by `nvcc`.
-
-### 4. Parameter Loading & Global Address Conversion
-- Kernel parameters in PTX reside in `.param` space. Pointer arguments cannot be dereferenced directly from parameter space.
-- `kernc` loads pointer parameters with `ld.param.u64 %rd_raw, [param_name];` and converts them to generic/global addresses via `cvta.to.global.u64 %rd_base, %rd_raw;` in the entry block prologue.
-
-### 5. IEEE-754 Hexadecimal Float Immediate Encoding
-- NVIDIA PTX mandates that 32-bit floating-point literals be encoded as IEEE-754 binary32 hexadecimal words: `0fXXXXXXXX`.
-- For example, `0.0f` is emitted as `0f00000000`, `3.14f` is emitted as `0f4048F5C3`. `PTXEmitter` serializes float immediates using bitwise byte transfers (`std::memcpy`) formatted to 8 uppercase hex digits.
-
-### 6. Non-Power-of-Two and Non-Block-Multiple Boundary Verification
-- GPU kernels in practice frequently process input arrays whose lengths are not multiples of the thread block size (`blockDim = 256`).
-- The test harness validates inputs with $N=1000$, $N=117$, $N=33$, and boundary $N=1$, rigorously exercising thread boundary checks (`if (i < n)`).
-
----
-
-## Example Kernel & Generated PTX
-
-### Source: `examples/saxpy.kern`
 ```c
 kernel saxpy(float a, float* x, float* y, int n) {
     int i = block_idx * block_dim + thread_idx;
@@ -173,13 +18,119 @@ kernel saxpy(float a, float* x, float* y, int n) {
 }
 ```
 
-### Generated PTX (`sm_86`, `.version 7.8`)
-```ptx
-// Generated by kernc targeting sm_86
-.version 7.8
-.target sm_86
-.address_size 64
+What it supports:
 
+- `int`, `float` and `bool`; `int*` / `float*` kernel parameters; `shared` arrays
+- `if` / `else`, `while`, `for`, `return`, `barrier()`
+- short-circuit `&&` / `||`, in conditions and as values
+- explicit `cast<T>()` between `int`, `float` and `bool`
+- constant folding and dead-code elimination
+- `.file` / `.loc` source line info with `-lineinfo`
+- diagnostics with `file:line:column` and a caret
+
+The suite has 82 tests, and all of them pass, both in a normal build and under
+UndefinedBehaviorSanitizer.
+
+---
+
+## Quick start (WSL2 Ubuntu 22.04)
+
+Requirements: CMake 3.16+, GCC 11+, Python 3, GoogleTest (`libgtest-dev`), and the CUDA 13.0
+toolkit (`/usr/local/cuda-13.0`). On WSL2 the GPU driver comes from Windows
+(`/usr/lib/wsl/lib/libcuda.so`); do not install a Linux driver inside WSL.
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+cd build && ctest --output-on-failure
+```
+
+Compile a kernel:
+
+```bash
+./build/kernc examples/saxpy.kern -o saxpy.ptx            # optimized (-O1 is the default)
+./build/kernc examples/saxpy.kern -O0 --dump-ir           # print the unoptimized IR
+./build/kernc examples/saxpy.kern -lineinfo -o saxpy.ptx  # add .file/.loc line info
+/usr/local/cuda-13.0/bin/ptxas -arch=sm_86 saxpy.ptx -o saxpy.cubin
+```
+
+| Option | Meaning |
+|---|---|
+| `-o <file>` | Output PTX file (default: stdout) |
+| `-O0` / `-O1` | Disable / enable optimization (default `-O1`) |
+| `-lineinfo`, `--generate-line-info` | Emit `.file` / `.loc` source line info |
+| `--dump-tokens`, `--dump-ir`, `--dump-opt-ir` | Print tokens, IR before / after optimization |
+
+To build with UndefinedBehaviorSanitizer, which turns undefined behaviour inside the compiler
+into a hard failure:
+
+```bash
+cmake -S . -B build-ubsan -DKERNC_SANITIZE=ON
+cmake --build build-ubsan -j
+cd build-ubsan && ctest
+```
+
+---
+
+## The language
+
+The full reference is in [docs/specs/01-scope.md](docs/specs/01-scope.md).
+
+| | |
+|---|---|
+| Types | `int` (`.s32`), `float` (`.f32`), `bool` (`.pred`); `int*` / `float*` as kernel parameters only |
+| Built-ins | `thread_idx` → `%tid.x`, `block_idx` → `%ctaid.x`, `block_dim` → `%ntid.x` (x dimension only) |
+| Statements | declarations, assignment, `if`/`else`, `while`, `for`, `return;`, `barrier();`, `shared T name[N];` |
+| Operators | `+ - * / %`, unary `- !`, `< <= > >= == !=`, `&&` `\|\|` (short-circuit), `p[i]` |
+| Casts | `cast<int>(x)`, `cast<float>(x)`, `cast<bool>(x)` |
+
+Rules that matter for correctness:
+
+- **No implicit conversions except `int` → `float`.** `bool` mixes with nothing; use `cast<>`.
+  `cast<bool>(x)` means `x != 0`, and NaN counts as true.
+- **Float comparisons follow C.** Every comparison is false when an operand is NaN, except
+  `!=`, which is true. It lowers to the unordered `setp.neu.f32`.
+- **Integer literals must fit in 32 bits.** kernc uses the same rule as Java: decimal values up
+  to `2147483647`, except that `-2147483648` is allowed; hex up to `0xFFFFFFFF`, read as a bit
+  pattern.
+- **`return;` ends the calling thread only.** Kernels return void, so `return x;` is an error.
+- **Shared memory.** `shared` arrays have `int`/`float` elements and a literal size, with at
+  most 48 KB per kernel (the sm_86 static limit). Every thread in a block must reach every
+  `barrier()`.
+- **`bool` cannot be a kernel parameter.** The `.param` space has no predicate type, so pass an
+  `int` instead.
+
+---
+
+## Architecture
+
+```
+ .kern ──► Lexer ──► Parser ──► Sema ──► IRGen ──► Optimizer ──► PTXEmitter ──► .ptx
+           tokens    AST        typed     3-address   constant      registers,
+           with      (unique_   AST,      IR, basic   folding,      state spaces,
+           line:col  ptr)       scopes    blocks      DCE           .file/.loc
+```
+
+| Stage | Files | Notes |
+|---|---|---|
+| Lexer | `Lexer.cpp`, `Token.h` | `string_view` tokens with line:column; decimal, hex and float literals |
+| Parser | `Parser.cpp`, `AST.h` | Recursive descent with precedence climbing for binary operators |
+| Sema | `Sema.cpp`, `Sema.h` | Nested scopes, type rules, literal range, shared-memory limit |
+| IRGen | `IRGen.cpp`, `IR.h` | Non-SSA three-address IR with typed virtual registers and basic blocks |
+| Optimizer | `Passes.cpp` | Constant folding (with PTX semantics) and dead-code elimination, repeated until nothing changes (at most 10 rounds) |
+| PTXEmitter | `PTXEmitter.cpp` | Register declarations, `.param`/`.global`/`.shared` access, line info |
+| Driver | `main.cpp` | CLI; diagnostics print as `file:line:col: error: ...` with the source line and a caret |
+
+The IR and code-generation rules are in [docs/specs/03-ir-and-codegen.md](docs/specs/03-ir-and-codegen.md).
+
+---
+
+## Example: SAXPY
+
+`./build/kernc examples/saxpy.kern` (the `.version` / `.target` / `.address_size` header is
+omitted):
+
+```ptx
 .visible .entry saxpy(
     .param .f32 saxpy_param_0,
     .param .u64 saxpy_param_1,
@@ -229,45 +180,199 @@ L_if_end_1:
 }
 ```
 
+### Compared with nvcc
+
+I compiled the same kernel as CUDA with `nvcc -arch=sm_86` and assembled both PTX files with
+ptxas 13.0:
+
+| | kernc | nvcc |
+|---|---|---|
+| PTX | `mul.lo` + `add`, `mul.f32` + `add.f32`, the `y[i]` address computed twice, index scale held in a register | `mad.lo.s32`, `fma.rn.f32`, one shared `mul.wide.s32 %rd5, %r1, 4`, `cvta` moved after the bounds check |
+| SASS after ptxas | 16 instructions, 10 registers | 16 instructions, 10 registers |
+
+(Instruction counts here exclude NOP padding.)
+
+The SASS is identical apart from register numbering. ptxas removed the duplicate address
+computation, fused `mul.f32` + `add.f32` into `FFMA`, and turned the bounds check into
+`@P0 EXIT`. For a kernel this simple, ptxas cleans up kernc's PTX completely.
+
+The reduction is different. For `examples/reduce.kern`, kernc gets **70 SASS instructions and
+12 registers**; the equivalent CUDA gets **37 and 10**. The cause is `s / 2` on a signed int:
+
+- nvcc's front end emits the signed divide-by-two idiom in PTX (`shr.u32 31`, add,
+  `shr.s32 1`).
+- kernc emits `div.s32`, which ptxas expands into a full division sequence built around two
+  `MUFU.RCP` instructions; nvcc's version has none.
+- I tested whether an immediate divisor (`div.s32 %r, %r, 2`) helps. It doesn't: the count is
+  still 70.
+
+So strength reduction of signed division is the front end's job, and kernc's optimizer doesn't
+do it yet.
+
 ---
 
-## Build & Test Instructions
+## Design decisions
 
-### Prerequisites (WSL2 Ubuntu 22.04)
-- CMake 3.16+
-- C++17 compiler (GCC 11+)
-- NVIDIA CUDA Toolkit 13.0 (`/usr/local/cuda-13.0/bin/ptxas`)
-- NVIDIA Driver Library (`/usr/lib/wsl/lib/libcuda.so`)
-- GoogleTest (`libgtest-dev`) & Python 3
+These are the decisions I'd expect to defend in a review, along with the reasons behind them.
 
-### Building
-```bash
-mkdir -p build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . -j
+**1. Non-SSA three-address IR.** PTX already has unlimited virtual registers and no phi
+nodes, and ptxas does the real register allocation. An SSA IR would therefore need an
+out-of-SSA pass just to get back to PTX. The cost of skipping SSA shows up in the optimizer:
+it only folds registers that are defined once (expression temporaries), and it never folds
+through variables. There's no copy propagation.
+
+**2. A register's type is fixed when the register is created.** `IRFunction::freshReg(IRType)`
+records the type, and it has no default argument, so every creation site has to state one.
+Originally the emitter guessed a register's class from the first instruction that used it.
+An uninitialized `int` compared in a `setp` therefore became a `.pred` register, and ptxas
+rejected the PTX. This is also what made shared memory easy to add: its 32-bit address
+registers are just `S32`.
+
+**3. Booleans: jumping code vs values.** In a condition, `a && b` never produces a value; it
+becomes branches (the "jumping code" scheme in the Dragon Book, §6.6). As a value
+(`bool ok = i < n && x[i] > 0`), it still has to short-circuit. `and.pred` would evaluate both
+sides and read `x[i]` out of bounds, so kernc reuses the branches and writes true or false into
+the result on each path. Plain comparisons `setp` straight into a predicate, `!` lowers to
+`not.pred`, `==`/`!=` on bools lower to `xor.pred`, and `cast<int>(b)` lowers to `selp`.
+
+**4. Constant folding is an interpreter for the target.** Folding must produce exactly what the
+PTX instruction would produce at run time, not what C++ would. `cvt.rzi.s32.f32` saturates and
+maps NaN to 0, so `cast<int>(1e20)` folds to INT_MAX. `.s32` arithmetic wraps, so the folder
+computes in `uint32_t`. Division by zero and `INT_MIN / -1` are left for the hardware. The
+`ptx::` helpers in `Passes.cpp` model one instruction each.
+
+**5. Address arithmetic depends on the state space.** Global pointers are 64-bit: the index is
+widened and scaled in one `mul.wide.s32`, then added with `add.s64`, after a one-time
+`cvta.to.global`. Shared arrays are module-scope `.shared` symbols named `<kernel>_<name>`,
+the way nvcc names them. Their addresses are 32-bit offsets into the block's shared window
+(`mov.u32` of the symbol, `mul.lo.s32`, `add.s32`), which saves registers.
+
+**6. Barriers and divergence.** `bar.sync 0` requires every thread in the block to arrive. The
+reduction therefore loads with `if (i < n) v = in[i];` instead of returning early, and its loop
+condition depends only on `block_dim`, so it's the same for every thread. kernc has no pass
+that moves loads or stores, but any future one (CSE, hoisting) would have to treat `bar.sync`
+as a fence for shared memory.
+
+**7. Line info works like nvcc's `-lineinfo`, not `-G`.** Each IR instruction carries the
+location of the statement that produced it, and a `.loc` is written only when the location
+changes. ptxas carries this through optimization into the cubin's `.nv_debug_line_sass` table.
+For SAXPY, `nvdisasm --print-line-info` shows (trimmed):
+
+```
+	//## File "examples/saxpy.kern", line 2
+ S2R R2, SR_CTAID.X
+ S2R R3, SR_TID.X
+ IMAD R2, R2, c[0x0][0x0], R3
+	//## File "examples/saxpy.kern", line 3
+ ISETP.GE.AND P0, PT, R2, c[0x0][0x178], PT
+ @P0 EXIT
+	//## File "examples/saxpy.kern", line 4
+ ...
+ FFMA R7, R4, c[0x0][0x160], R7
+ STG.E [R2.64], R7
+	//## File "examples/saxpy.kern", line 6
+ EXIT
 ```
 
-### Running All Tests via CTest
-```bash
-ctest --output-on-failure
-```
+Optimization stays on: ptxas turned the bounds check into a predicated `EXIT` and still kept
+the right lines.
 
-### Test Suite Summary
-```
-100% tests passed, 0 tests failed out of 37
+**8. Integer literal range follows Java.** `-2147483648` lexes as minus applied to
+`2147483648`, which doesn't fit in an `int` on its own. C handles this by giving the literal a
+wider type, but kernc has no wider type, so it uses Java's rule from JLS §3.10.1. The check
+runs in Sema, not the lexer, because only Sema can see the surrounding unary minus.
 
-  - 23 Unit Tests (Lexer, Parser, Sema, IRPass)       [PASSED]
-  -  9 Hardware GPU Execution Tests (CUDA Driver API) [PASSED]
-  -  1 Negative Diagnostic Test Suite (6 files)       [PASSED]
-  -  4 ptxas sm_86 Acceptance Tests                   [PASSED]
-```
+---
 
-### Running the CLI Compiler
-```bash
-./build/kernc examples/saxpy.kern -o saxpy.ptx
-```
+## Testing
 
-### Running the Standalone Runner
-```bash
-./build/kernc-runner saxpy.ptx saxpy 1024
+| Suite | Count | What it checks |
+|---|---|---|
+| Unit tests (GoogleTest) | 50 | Lexer 6, parser 9, Sema 16 (accept and reject cases, many checking `line:col`), IR and PTX 19 |
+| GPU end-to-end (Driver API) | 16 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
+| Diagnostics | 1 suite, 8 files | `tests/diagnostic/err_*.kern` must fail with the expected message (and location, where given) |
+| ptxas acceptance | 5 | Every file in `examples/` assembles with `ptxas -arch=sm_86` |
+| ptxas regression | 8 | `tests/regress/*.kern` (4 kernels) assemble at both `-O0` and `-O1` |
+| Line tables | 2 | `kernc -lineinfo` → ptxas → `nvdisasm --print-line-info`; each `//@ REGEX` line must own matching SASS |
+
+The GPU tests cover:
+
+- vector add, SAXPY, clamp and ReLU at sizes that aren't block multiples (1000, 117, 33, 1);
+- an early-return guard where the extra threads must not write anything;
+- a `return` inside a loop;
+- 13 kinds of `bool` expression, with NaN and `-0.0` inputs;
+- a block reverse through shared memory;
+- the shipped reduction example, for 1 to 2²⁰+3 elements;
+- PTX with line info under `CU_JIT_GENERATE_LINE_INFO`;
+- a differential test where `-O0` and `-O1` must give bit-identical results on edge-case
+  constants.
+
+Two techniques do most of the work:
+
+- **Differential testing.** `-O0` vs `-O1` on the GPU needs no hand-written expected values,
+  because the GPU itself decides what's correct.
+- **Mutation checks.** After each fix, I reverted it on purpose to confirm a test fails:
+  - the old float-to-int fold fails the differential test;
+  - `setp.ne` instead of `setp.neu` fails the NaN case;
+  - removing `bar.sync` fails the block-reverse test, first at thread 64, the first thread of
+    the third warp, which read data before its partner warp had written it;
+  - removing statement locations fails all six line-table checks.
+
+### Bugs the tests found
+
+The first version passed its own 37 tests, but checks against the GPU, ptxas and UBSan found
+these bugs:
+
+| Bug | Effect |
+|---|---|
+| Register class inferred from the first use | ptxas rejected kernels that read an uninitialized variable in `setp`, `mul.wide` or `st` |
+| `cast<int>(1e20)` folded with C++ semantics | Gave INT_MIN at `-O1` but INT_MAX at `-O0` on the GPU |
+| `INT_MIN / -1` folded on the host | **kernc itself crashed** with SIGFPE |
+| Signed overflow while folding | Undefined behaviour inside the compiler; it happened to wrap |
+| `if (v % 2)` treated as a comparison | **Compiled as `v == 2`**, and the `%` was never computed |
+| Float `!=` lowered to `setp.ne.f32` | `x != x` was false for NaN |
+| Comparisons used as values | Lowered to `add.s32` (hidden until `bool` existed) |
+| Out-of-range literals | `3000000000` was silently truncated |
+
+Every fix is in the commit history, together with a test that failed before the fix.
+
+---
+
+## Limitations and next steps
+
+- **Strength reduction of signed `/` and `%` by powers of two.** This is the measured gap
+  against nvcc in the reduction (see above). `% 128` has the same problem.
+- **No CSE or copy propagation in kernc.** For SAXPY ptxas makes up for it, as shown above,
+  but kernc's own PTX still recomputes addresses and reloads constants.
+- **No unreachable-block removal.** Code after `return` leaves an unreachable `L_after_ret`
+  block in the PTX; ptxas removes it.
+- **No definite-assignment analysis.** Reading an uninitialized variable produces valid PTX
+  but an undefined value, as in C, and kernc doesn't warn about it.
+- **No barrier-divergence warning.** A `barrier()` behind a thread-dependent condition (or
+  after an early `return` taken by some threads) isn't diagnosed.
+- **Not yet supported:** device functions (`.func`), y/z dimensions, structs, 64-bit types
+  other than pointers, and `bool` parameters.
+- **Line info is per statement**, not per expression. Also, `-(2147483648)` is accepted
+  because parentheses aren't kept in the AST; Java rejects it.
+- **`tools/runner` (`kernc-runner`) is only a load check.** It JIT-loads a PTX file and looks up
+  the kernel, but doesn't launch it. The GPU tests in `tests/e2e/` are the real harness.
+- **compute-sanitizer can't run under WSL here** until the Windows debugger interface is
+  enabled (run `EnableDebuggerInterface.bat` as administrator). With it, memcheck could report
+  faults against `.kern` lines using `-lineinfo`.
+
+---
+
+## Repository layout
+
+```
+include/kernc/       public headers: Token, Lexer, AST, Parser, Sema, IR, IRGen, Passes, PTXEmitter
+src/                 implementation, plus main.cpp (the kernc CLI)
+examples/            vecadd, saxpy, clamp, relu, reduce (shared-memory reduction)
+tests/unit/          GoogleTest: lexer, parser, Sema, IR and PTX emission
+tests/e2e/           GPU tests through the CUDA Driver API
+tests/diagnostic/    err_*.kern files and the runner that checks their messages
+tests/regress/       kernels assembled by ptxas at -O0 and -O1
+tests/lineinfo/      line-table kernels and check_lineinfo.py (ptxas + nvdisasm)
+tools/runner/        kernc-runner (PTX load check)
+docs/specs/          scope, architecture, IR and codegen, testing strategy
 ```
