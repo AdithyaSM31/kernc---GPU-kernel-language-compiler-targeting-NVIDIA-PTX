@@ -70,7 +70,7 @@ CUdevice CudaEnvironment::device = 0;
 CUcontext CudaEnvironment::context = nullptr;
 bool CudaEnvironment::available = false;
 
-static std::string compileSourceToPTX(const std::string& src) {
+static std::string compileSourceToPTX(const std::string& src, bool optimize = true) {
     DiagnosticsEngine diag;
     Lexer lexer(src, &diag);
     Parser parser(lexer, diag);
@@ -84,7 +84,9 @@ static std::string compileSourceToPTX(const std::string& src) {
 
     IRGen irgen(diag);
     auto irMod = irgen.emitModule(*prog);
-    Optimizer::runPasses(irMod);
+    if (optimize) {
+        Optimizer::runPasses(irMod);
+    }
 
     PTXEmitter emitter;
     return emitter.emitModule(irMod);
@@ -387,6 +389,72 @@ TEST_F(KernelE2ETest, ReLU_NonBlockMultiple_1000) {
 
 TEST_F(KernelE2ETest, ReLU_Small_33) {
     runReLUTest(this, 33);
+}
+
+// -------------------------------------------------------------
+// Differential test: the optimizer must not change observable results
+// -------------------------------------------------------------
+// Each output is a constant expression, so -O1 folds it inside kernc while -O0 leaves it to
+// the GPU. The two runs must agree bit-for-bit.
+static std::vector<int32_t> runFoldEdges(KernelE2ETest* fixture, bool optimize) {
+    const char* src =
+        "kernel fold_edges(int* o, float* f) {\n"
+        "    o[0] = 2147483647 + 1;\n"
+        "    o[1] = (-2147483647 - 1) - 1;\n"
+        "    o[2] = 65536 * 65536;\n"
+        "    o[3] = -(-2147483647 - 1);\n"
+        "    o[4] = (-2147483647 - 1) / -1;\n"
+        "    o[5] = (-2147483647 - 1) % -1;\n"
+        "    o[6] = cast<int>(1e20);\n"
+        "    o[7] = cast<int>(-1e20);\n"
+        "    o[8] = cast<int>(2.9);\n"
+        "    o[9] = cast<int>(-2.9);\n"
+        "    o[10] = cast<int>(2147483520.0);\n"
+        "    o[11] = 7 / -2;\n"
+        "    o[12] = -7 % 3;\n"
+        "    f[0] = 0.1 + 0.2;\n"
+        "    f[1] = 1.0 / 3.0;\n"
+        "    f[2] = cast<float>(16777217);\n"
+        "    f[3] = -0.0 - 0.0;\n"
+        "}\n";
+    const int numInts = 13, numFloats = 4;
+
+    std::vector<int32_t> result;
+    std::string ptx = compileSourceToPTX(src, optimize);
+    EXPECT_FALSE(ptx.empty());
+    if (ptx.empty()) return result;
+
+    CUmodule mod = fixture->loadPTX(ptx);
+    if (!mod) return result;
+    CUfunction func;
+    EXPECT_EQ(cuModuleGetFunction(&func, mod, "fold_edges"), CUDA_SUCCESS);
+
+    CUdeviceptr d_o, d_f;
+    EXPECT_EQ(cuMemAlloc(&d_o, numInts * sizeof(int32_t)), CUDA_SUCCESS);
+    EXPECT_EQ(cuMemAlloc(&d_f, numFloats * sizeof(float)), CUDA_SUCCESS);
+    void* args[] = { &d_o, &d_f };
+    EXPECT_EQ(cuLaunchKernel(func, 1, 1, 1, 1, 1, 1, 0, 0, args, 0), CUDA_SUCCESS);
+    EXPECT_EQ(cuCtxSynchronize(), CUDA_SUCCESS);
+
+    // Floats are compared as raw bits so -0.0 vs +0.0 and rounding differences are caught.
+    result.resize(numInts + numFloats);
+    EXPECT_EQ(cuMemcpyDtoH(result.data(), d_o, numInts * sizeof(int32_t)), CUDA_SUCCESS);
+    EXPECT_EQ(cuMemcpyDtoH(result.data() + numInts, d_f, numFloats * sizeof(float)), CUDA_SUCCESS);
+
+    cuMemFree(d_o);
+    cuMemFree(d_f);
+    cuModuleUnload(mod);
+    return result;
+}
+
+TEST_F(KernelE2ETest, ConstantFoldingMatchesUnoptimizedGPU) {
+    std::vector<int32_t> unopt = runFoldEdges(this, false);
+    std::vector<int32_t> opt = runFoldEdges(this, true);
+    ASSERT_EQ(unopt.size(), opt.size());
+    ASSERT_FALSE(unopt.empty());
+    for (size_t k = 0; k < unopt.size(); ++k) {
+        EXPECT_EQ(opt[k], unopt[k]) << "output " << k << " differs between -O1 and -O0";
+    }
 }
 
 int main(int argc, char** argv) {

@@ -6,7 +6,10 @@
 #include "kernc/Passes.h"
 #include "kernc/PTXEmitter.h"
 #include <cctype>
+#include <cstdint>
+#include <limits>
 #include <sstream>
+#include <unordered_map>
 
 using namespace kernc;
 
@@ -135,6 +138,92 @@ TEST(IRPassTest, UninitializedIntIndexKeepsS32RegisterClass) {
     EXPECT_TRUE(isRegClass(ops[0], "%rd")) << ptx;
     EXPECT_TRUE(isRegClass(ops[1], "%r")) << ptx;
     EXPECT_TRUE(isRegClass(ops[2], "%r")) << ptx;
+}
+
+// Optimizes the kernel, then returns the constant stored by each st.global, in program order.
+// Folding must have reduced every stored value to an immediate for this to be meaningful.
+static std::vector<int32_t> storedConstants(const std::string& src) {
+    auto fn = compileToIR(src);
+    Optimizer::runPasses(fn);
+    std::unordered_map<VReg, int32_t> imms;
+    std::vector<int32_t> stored;
+    for (const auto& bb : fn.blocks) {
+        for (const auto& inst : bb.instructions) {
+            if (inst.op == IROp::LoadImm) imms[inst.dst] = inst.immInt;
+            if (inst.op == IROp::Store) {
+                EXPECT_TRUE(imms.count(inst.src2)) << "stored value was not folded:\n" << fn.dump();
+                stored.push_back(imms[inst.src2]);
+            }
+        }
+    }
+    return stored;
+}
+
+static int countOps(const IRFunction& fn, IROp op) {
+    int n = 0;
+    for (const auto& bb : fn.blocks)
+        for (const auto& inst : bb.instructions)
+            if (inst.op == op) ++n;
+    return n;
+}
+
+TEST(IRPassTest, FoldFloatToIntSaturatesLikeCvtRzi) {
+    // cvt.rzi.s32.f32 truncates toward zero and clamps out-of-range values.
+    auto v = storedConstants("kernel t(int* o) {\n"
+                             "    o[0] = cast<int>(1e20);\n"
+                             "    o[1] = cast<int>(-1e20);\n"
+                             "    o[2] = cast<int>(2.9);\n"
+                             "    o[3] = cast<int>(-2.9);\n"
+                             "}\n");
+    ASSERT_EQ(v.size(), 4u);
+    EXPECT_EQ(v[0], INT32_MAX);
+    EXPECT_EQ(v[1], INT32_MIN);
+    EXPECT_EQ(v[2], 2);
+    EXPECT_EQ(v[3], -2);
+}
+
+TEST(IRPassTest, FoldFloatToIntNaNIsZero) {
+    // No NaN literal exists in the language, so build the IR directly.
+    IRFunction fn;
+    VReg f = fn.freshReg(IRType::F32);
+    VReg i = fn.freshReg(IRType::S32);
+    IRInst nan{IROp::LoadImm, f, 0, 0, IRType::F32};
+    nan.immFloat = std::numeric_limits<float>::quiet_NaN();
+    fn.emit(nan);
+    fn.emit(IRInst{IROp::CvtF2I, i, f, 0, IRType::S32});
+
+    Optimizer::runConstantFolding(fn);
+    const IRInst& cvt = fn.blocks[0].instructions[1];
+    ASSERT_EQ(cvt.op, IROp::LoadImm);
+    EXPECT_EQ(cvt.immInt, 0);
+}
+
+TEST(IRPassTest, FoldSignedArithmeticWrapsLikeS32) {
+    // add/sub/mul.lo/neg .s32 wrap modulo 2^32 on the GPU. Folding with C++ signed
+    // arithmetic is undefined behaviour in the compiler (caught by KERNC_SANITIZE).
+    auto v = storedConstants("kernel t(int* o) {\n"
+                             "    o[0] = 2147483647 + 1;\n"
+                             "    o[1] = (-2147483647 - 1) - 1;\n"
+                             "    o[2] = 65536 * 65536;\n"
+                             "    o[3] = -(-2147483647 - 1);\n"
+                             "}\n");
+    ASSERT_EQ(v.size(), 4u);
+    EXPECT_EQ(v[0], INT32_MIN);
+    EXPECT_EQ(v[1], INT32_MAX);
+    EXPECT_EQ(v[2], 0);
+    EXPECT_EQ(v[3], INT32_MIN);
+}
+
+TEST(IRPassTest, FoldLeavesIntMinDivideByMinusOneToHardware) {
+    // INT_MIN / -1 overflows; div.s32/rem.s32 leave the result unspecified, so the
+    // folder must not invent one.
+    auto fn = compileToIR("kernel t(int* o) {\n"
+                          "    o[0] = (-2147483647 - 1) / -1;\n"
+                          "    o[1] = (-2147483647 - 1) % -1;\n"
+                          "}\n");
+    Optimizer::runPasses(fn);
+    EXPECT_EQ(countOps(fn, IROp::Div), 1) << fn.dump();
+    EXPECT_EQ(countOps(fn, IROp::Mod), 1) << fn.dump();
 }
 
 TEST(IRPassTest, PTXEmissionValidStructure) {

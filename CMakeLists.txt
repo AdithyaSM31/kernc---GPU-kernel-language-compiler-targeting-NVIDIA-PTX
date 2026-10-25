@@ -12,6 +12,14 @@ else()
     add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+# UndefinedBehaviorSanitizer: makes UB inside the compiler (e.g. signed overflow while
+# constant folding) abort instead of silently "working" on the host.
+option(KERNC_SANITIZE "Build with -fsanitize=undefined" OFF)
+if (KERNC_SANITIZE AND NOT MSVC)
+    add_compile_options(-fsanitize=undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=undefined)
+endif()
+
 # Find CUDA / ptxas / libcuda
 find_path(CUDA_INCLUDE_DIRS cuda.h
     PATHS

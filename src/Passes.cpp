@@ -1,9 +1,38 @@
 #include "kernc/Passes.h"
+#include <cmath>
+#include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
 #include <variant>
 
 namespace kernc {
+
+// Folding must reproduce what the PTX instruction computes on the GPU, not what C++
+// computes on the host. These helpers are the target semantics, one per instruction.
+namespace ptx {
+
+// add/sub/mul.lo/neg .s32 wrap modulo 2^32. Computing in uint32_t avoids C++ signed-overflow
+// UB; converting back to int32_t is modular on GCC/Clang (and guaranteed from C++20).
+static int32_t wrap(uint32_t v) { return static_cast<int32_t>(v); }
+static int32_t addS32(int32_t a, int32_t b) { return wrap(static_cast<uint32_t>(a) + static_cast<uint32_t>(b)); }
+static int32_t subS32(int32_t a, int32_t b) { return wrap(static_cast<uint32_t>(a) - static_cast<uint32_t>(b)); }
+static int32_t mulLoS32(int32_t a, int32_t b) { return wrap(static_cast<uint32_t>(a) * static_cast<uint32_t>(b)); }
+static int32_t negS32(int32_t a) { return wrap(0u - static_cast<uint32_t>(a)); }
+
+// div.s32/rem.s32 truncate toward zero like C++, but division by zero and INT_MIN / -1 give
+// an unspecified result on the GPU (and trap on x86), so those are never folded.
+static bool canFoldDivS32(int32_t a, int32_t b) { return b != 0 && !(a == INT32_MIN && b == -1); }
+
+// cvt.rzi.s32.f32 rounds toward zero, saturates to the s32 range, and maps NaN to 0.
+// A plain static_cast is UB for out-of-range values and NaN.
+static int32_t cvtRziS32F32(float f) {
+    if (std::isnan(f)) return 0;
+    if (f >= 2147483648.0f) return INT32_MAX;
+    if (f <= -2147483648.0f) return INT32_MIN;
+    return static_cast<int32_t>(f);
+}
+
+} // namespace ptx
 
 struct ConstVal {
     bool isFloat = false;
@@ -53,15 +82,15 @@ bool Optimizer::runConstantFolding(IRFunction& fn) {
                     bool folded = true;
                     int32_t res = 0;
                     switch (inst.op) {
-                        case IROp::Add: res = c1.intVal + c2.intVal; break;
-                        case IROp::Sub: res = c1.intVal - c2.intVal; break;
-                        case IROp::Mul: res = c1.intVal * c2.intVal; break;
+                        case IROp::Add: res = ptx::addS32(c1.intVal, c2.intVal); break;
+                        case IROp::Sub: res = ptx::subS32(c1.intVal, c2.intVal); break;
+                        case IROp::Mul: res = ptx::mulLoS32(c1.intVal, c2.intVal); break;
                         case IROp::Div:
-                            if (c2.intVal != 0) res = c1.intVal / c2.intVal;
+                            if (ptx::canFoldDivS32(c1.intVal, c2.intVal)) res = c1.intVal / c2.intVal;
                             else folded = false;
                             break;
                         case IROp::Mod:
-                            if (c2.intVal != 0) res = c1.intVal % c2.intVal;
+                            if (ptx::canFoldDivS32(c1.intVal, c2.intVal)) res = c1.intVal % c2.intVal;
                             else folded = false;
                             break;
                         default:
@@ -112,7 +141,7 @@ bool Optimizer::runConstantFolding(IRFunction& fn) {
                 if (inst.op == IROp::Neg && !c1.isFloat) {
                     inst.op = IROp::LoadImm;
                     inst.src1 = 0;
-                    inst.immInt = -c1.intVal;
+                    inst.immInt = ptx::negS32(c1.intVal);
                     constTable[inst.dst] = ConstVal{false, inst.immInt, 0.0f};
                     changed = true;
                     continue;
@@ -135,7 +164,7 @@ bool Optimizer::runConstantFolding(IRFunction& fn) {
                     inst.op = IROp::LoadImm;
                     inst.src1 = 0;
                     inst.type = IRType::S32;
-                    inst.immInt = static_cast<int32_t>(c1.floatVal);
+                    inst.immInt = ptx::cvtRziS32F32(c1.floatVal);
                     constTable[inst.dst] = ConstVal{false, inst.immInt, 0.0f};
                     changed = true;
                     continue;
