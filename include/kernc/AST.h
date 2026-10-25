@@ -8,7 +8,7 @@
 namespace kernc {
 
 struct Type {
-    enum Kind { Void, Int, Float, Ptr, Pred };
+    enum Kind { Void, Int, Float, Ptr, Bool };
     Kind kind = Void;
     Kind pointeeKind = Void;
 
@@ -17,13 +17,13 @@ struct Type {
     static Type makeFloat() { return {Float, Void}; }
     static Type makeIntPtr() { return {Ptr, Int}; }
     static Type makeFloatPtr() { return {Ptr, Float}; }
-    static Type makePred() { return {Pred, Void}; }
+    static Type makeBool() { return {Bool, Void}; }
 
     bool isVoid() const { return kind == Void; }
     bool isInt() const { return kind == Int; }
     bool isFloat() const { return kind == Float; }
     bool isPtr() const { return kind == Ptr; }
-    bool isPred() const { return kind == Pred; }
+    bool isBool() const { return kind == Bool; }
 
     bool operator==(const Type& o) const {
         if (kind != o.kind) return false;
@@ -37,7 +37,7 @@ struct Type {
             case Void: return "void";
             case Int: return "int";
             case Float: return "float";
-            case Pred: return "pred";
+            case Bool: return "bool";
             case Ptr:
                 if (pointeeKind == Int) return "int*";
                 if (pointeeKind == Float) return "float*";
@@ -70,6 +70,13 @@ struct FloatLiteralExpr : public Expr {
     double value = 0.0;
     explicit FloatLiteralExpr(double val) : value(val) {
         resolvedType = Type::makeFloat();
+    }
+};
+
+struct BoolLiteralExpr : public Expr {
+    bool value = false;
+    explicit BoolLiteralExpr(bool val) : value(val) {
+        resolvedType = Type::makeBool();
     }
 };
 

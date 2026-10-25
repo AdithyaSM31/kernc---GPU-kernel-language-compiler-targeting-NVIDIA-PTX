@@ -130,6 +130,51 @@ TEST(SemaTest, ReturnWithValueRejected) {
               std::string::npos) << diag.formatAll();
 }
 
+TEST(SemaTest, BoolValuesAccepted) {
+    std::string src = "kernel test(int* o, float* f, int n) {\n"
+                      "    bool t = true;\n"
+                      "    bool b = n < 10;\n"
+                      "    bool c = t && !b || n == 3;\n"
+                      "    bool d = c == b;\n"
+                      "    bool e = cast<bool>(n);\n"
+                      "    bool g = cast<bool>(f[0]);\n"
+                      "    if (d != e) { o[0] = cast<int>(g); }\n"
+                      "    while (b) { b = false; }\n"
+                      "    f[1] = cast<float>(t);\n"
+                      "}\n";
+    DiagnosticsEngine diag;
+    EXPECT_TRUE(checkSource(src, diag)) << diag.formatAll();
+}
+
+TEST(SemaTest, BoolTypeErrorsNameBool) {
+    // bool does not mix with int/float except through cast<>, and errors must say 'bool'
+    // (not the internal predicate type).
+    const std::pair<const char*, const char*> cases[] = {
+        {"int x = true;", "cannot initialize 'int' with 'bool'"},
+        {"bool b = 1;", "cannot initialize 'bool' with 'int'"},
+        {"int x = true + 1;", "invalid operands to binary operator '+' ('bool' and 'int')"},
+        {"bool b = true < false;", "invalid operands to comparison operator '<' ('bool' and 'bool')"},
+        {"bool b = true == 1;", "invalid operands to comparison operator '==' ('bool' and 'int')"},
+        {"o[0] = n < 3;", "cannot assign 'bool' to 'int'"},
+    };
+    for (const auto& [stmt, expected] : cases) {
+        std::string src = std::string("kernel test(int* o, int n) {\n    ") + stmt + "\n}\n";
+        DiagnosticsEngine diag;
+        EXPECT_FALSE(checkSource(src, diag)) << stmt;
+        EXPECT_NE(diag.formatAll().find(expected), std::string::npos)
+            << stmt << "\n" << diag.formatAll();
+    }
+}
+
+TEST(SemaTest, BoolParameterRejected) {
+    // A .pred register cannot be a kernel .param; callers pass an int instead.
+    std::string src = "kernel test(bool flag) {\n}\n";
+    DiagnosticsEngine diag;
+    EXPECT_FALSE(checkSource(src, diag));
+    EXPECT_NE(diag.formatAll().find("1:13: error: kernel parameter 'flag' cannot have type 'bool'"),
+              std::string::npos) << diag.formatAll();
+}
+
 TEST(SemaTest, NonIntSubscript) {
     std::string src = "kernel test(float* p) {\n"
                       "    float y = p[1.5];\n"

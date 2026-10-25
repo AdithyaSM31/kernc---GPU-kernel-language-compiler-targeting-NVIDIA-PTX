@@ -194,7 +194,24 @@ std::string PTXEmitter::emitFunction(const IRFunction& fn) {
                     ss << "    setp.eq.f32 " << dst << ", " << s1 << ", " << s2 << ";\n";
                     break;
                 case IROp::SetpFNe:
-                    ss << "    setp.ne.f32 " << dst << ", " << s1 << ", " << s2 << ";\n";
+                    // C's != is unordered: NaN != x is true. PTX setp.ne is ordered (false for
+                    // NaN); setp.neu is the unordered form, and the one nvcc emits for !=.
+                    ss << "    setp.neu.f32 " << dst << ", " << s1 << ", " << s2 << ";\n";
+                    break;
+
+                // Predicate logic and bool conversions
+                case IROp::NotPred:
+                    ss << "    not.pred " << dst << ", " << s1 << ";\n";
+                    break;
+                case IROp::XorPred:
+                    ss << "    xor.pred " << dst << ", " << s1 << ", " << s2 << ";\n";
+                    break;
+                case IROp::CvtPredToS32:
+                    ss << "    selp.s32 " << dst << ", 1, 0, " << s1 << ";\n";
+                    break;
+                case IROp::CvtPredToF32:
+                    ss << "    selp.f32 " << dst << ", " << formatFloatHex(1.0f) << ", "
+                       << formatFloatHex(0.0f) << ", " << s1 << ";\n";
                     break;
 
                 // Data Movement
@@ -213,6 +230,8 @@ std::string PTXEmitter::emitFunction(const IRFunction& fn) {
                 case IROp::LoadImm:
                     if (inst.type == IRType::F32) {
                         ss << "    mov.f32 " << dst << ", " << formatFloatHex(inst.immFloat) << ";\n";
+                    } else if (inst.type == IRType::Pred) {
+                        ss << "    mov.pred " << dst << ", " << (inst.immInt ? 1 : 0) << ";\n";
                     } else {
                         ss << "    mov.s32 " << dst << ", " << inst.immInt << ";\n";
                     }

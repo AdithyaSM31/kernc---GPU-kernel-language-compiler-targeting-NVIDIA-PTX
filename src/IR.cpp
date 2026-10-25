@@ -28,6 +28,10 @@ const char* irOpToString(IROp op) {
         case IROp::FNeg:       return "fneg";
         case IROp::CvtF2I:     return "cvt.f2i";
         case IROp::CvtI2F:     return "cvt.i2f";
+        case IROp::CvtPredToS32: return "cvt.pred2i";
+        case IROp::CvtPredToF32: return "cvt.pred2f";
+        case IROp::NotPred:    return "not.pred";
+        case IROp::XorPred:    return "xor.pred";
         case IROp::SetpLt:     return "setp.lt";
         case IROp::SetpGt:     return "setp.gt";
         case IROp::SetpLe:     return "setp.le";
@@ -90,6 +94,9 @@ std::string IRInst::toString() const {
         case IROp::FNeg:
         case IROp::CvtF2I:
         case IROp::CvtI2F:
+        case IROp::CvtPredToS32:
+        case IROp::CvtPredToF32:
+        case IROp::NotPred:
         case IROp::CvtaGlobal:
         case IROp::Mov:
             ss << "%v" << src1;

@@ -48,7 +48,16 @@ Type Parser::parseType() {
         }
         return Type::makeFloat();
     }
-    diag_.error(current_.loc, "expected type ('int' or 'float')");
+    if (match(TokenKind::KW_bool)) {
+        // bool lives in .pred registers, which have no memory representation to point at.
+        if (check(TokenKind::Star)) {
+            diag_.error(current_.loc, "pointers to 'bool' are not supported");
+            hasError_ = true;
+            advance();
+        }
+        return Type::makeBool();
+    }
+    diag_.error(current_.loc, "expected type ('int', 'float' or 'bool')");
     hasError_ = true;
     return Type::makeVoid();
 }
@@ -111,7 +120,7 @@ std::unique_ptr<Program> Parser::parseProgram() {
 }
 
 std::unique_ptr<Stmt> Parser::parseStmt() {
-    if (check(TokenKind::KW_int) || check(TokenKind::KW_float)) {
+    if (check(TokenKind::KW_int) || check(TokenKind::KW_float) || check(TokenKind::KW_bool)) {
         return parseVarDecl();
     }
     if (check(TokenKind::KW_if)) {
@@ -217,7 +226,7 @@ std::unique_ptr<Stmt> Parser::parseForStmt() {
 
     // Init
     std::unique_ptr<Stmt> init = nullptr;
-    if (check(TokenKind::KW_int) || check(TokenKind::KW_float)) {
+    if (check(TokenKind::KW_int) || check(TokenKind::KW_float) || check(TokenKind::KW_bool)) {
         init = parseVarDecl();
     } else if (match(TokenKind::Semicolon)) {
         init = nullptr;
@@ -386,6 +395,10 @@ std::unique_ptr<Expr> Parser::parsePrimary() {
     if (check(TokenKind::IntLiteral)) {
         Token tok = advance();
         expr = std::make_unique<IntLiteralExpr>(tok.intVal, std::string(tok.text));
+        expr->range = {tok.loc, tok.loc};
+    } else if (check(TokenKind::KW_true) || check(TokenKind::KW_false)) {
+        Token tok = advance();
+        expr = std::make_unique<BoolLiteralExpr>(tok.kind == TokenKind::KW_true);
         expr->range = {tok.loc, tok.loc};
     } else if (check(TokenKind::FloatLiteral)) {
         Token tok = advance();

@@ -29,6 +29,11 @@ enum class IROp {
     Neg, FNeg,
     // Type Conversions
     CvtF2I, CvtI2F,
+    CvtPredToS32, // dst:s32 = src1 ? 1 : 0       (selp.s32)
+    CvtPredToF32, // dst:f32 = src1 ? 1.0 : 0.0   (selp.f32)
+    // Predicate Logic
+    NotPred,      // dst:pred = !src1
+    XorPred,      // dst:pred = src1 != src2
     // Comparisons
     SetpLt, SetpGt, SetpLe, SetpGe, SetpEq, SetpNe,
     SetpFLt, SetpFGt, SetpFLe, SetpFGe, SetpFEq, SetpFNe,

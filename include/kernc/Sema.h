@@ -74,7 +74,7 @@ private:
     Type checkIntLiteral(IntLiteralExpr& expr, bool negated);
 
     bool isConditionType(const Type& t) const {
-        return t.isPred() || t.isInt();
+        return t.isBool() || t.isInt();
     }
 
     DiagnosticsEngine& diag_;

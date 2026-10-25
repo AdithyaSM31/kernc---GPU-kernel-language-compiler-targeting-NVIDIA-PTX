@@ -57,7 +57,9 @@ bool Optimizer::runConstantFolding(IRFunction& fn) {
     std::unordered_map<VReg, ConstVal> constTable;
     for (const auto& bb : fn.blocks) {
         for (const auto& inst : bb.instructions) {
-            if (inst.op == IROp::LoadImm && inst.dst != 0 && defCount[inst.dst] == 1) {
+            // Predicate immediates are not tracked: no folding rule here consumes a .pred.
+            if (inst.op == IROp::LoadImm && inst.dst != 0 && defCount[inst.dst] == 1 &&
+                inst.type != IRType::Pred) {
                 ConstVal cv;
                 cv.isFloat = (inst.type == IRType::F32);
                 cv.intVal = inst.immInt;

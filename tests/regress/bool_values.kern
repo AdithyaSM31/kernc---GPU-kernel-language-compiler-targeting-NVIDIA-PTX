@@ -1,0 +1,19 @@
+// Every way a bool can be produced, combined and consumed, run through ptxas at -O0 and -O1.
+kernel bool_values(int* o, float* f, int n) {
+    bool t = true;
+    bool fl = false;
+    bool lt = n < 10;
+    bool fne = f[0] != f[1];
+    bool sc = lt && f[n] > 0.0 || !t;
+    bool eq = sc == lt;
+    bool ne = eq != fl;
+    bool nz = cast<bool>(n);
+    bool fnz = cast<bool>(f[2]);
+    bool notint = !n;
+    bool u;
+    u = ne;
+    if (u) { o[0] = cast<int>(eq); }
+    while (fne && nz) { fne = false; }
+    f[3] = cast<float>(fnz) + cast<float>(notint);
+    if (n % 3) { o[1] = n - 1; }
+}

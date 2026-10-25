@@ -23,6 +23,11 @@ bool Sema::checkKernel(KernelDecl& kernel) {
             diag_.error(param.loc, "kernel parameter cannot have reserved builtin name '" + param.name + "'");
             continue;
         }
+        if (param.type.isBool()) {
+            // bool lives in .pred registers, and the .param space has no predicate type.
+            diag_.error(param.loc, "kernel parameter '" + param.name +
+                        "' cannot have type 'bool' (pass an int instead)");
+        }
         if (!symTable_.declare(param.name, param.type)) {
             diag_.error(param.loc, "duplicate kernel parameter name '" + param.name + "'");
         }
@@ -178,6 +183,10 @@ Type Sema::checkExpr(Expr& expr) {
         expr.resolvedType = Type::makeFloat();
         return expr.resolvedType;
     }
+    if (dynamic_cast<BoolLiteralExpr*>(&expr)) {
+        expr.resolvedType = Type::makeBool();
+        return expr.resolvedType;
+    }
     if (dynamic_cast<BuiltinExpr*>(&expr)) {
         expr.resolvedType = Type::makeInt();
         return expr.resolvedType;
@@ -273,8 +282,12 @@ Type Sema::checkBinaryExpr(BinaryExpr& expr) {
         case BinaryOp::Ge:
         case BinaryOp::Eq:
         case BinaryOp::Ne: {
-            if ((lhsType.isInt() || lhsType.isFloat()) && (rhsType.isInt() || rhsType.isFloat())) {
-                expr.resolvedType = Type::makePred();
+            bool numeric = (lhsType.isInt() || lhsType.isFloat()) && (rhsType.isInt() || rhsType.isFloat());
+            // bools are equality-comparable with each other only; they have no ordering.
+            bool boolEquality = lhsType.isBool() && rhsType.isBool() &&
+                                (expr.op == BinaryOp::Eq || expr.op == BinaryOp::Ne);
+            if (numeric || boolEquality) {
+                expr.resolvedType = Type::makeBool();
             } else {
                 diag_.error(expr.range.begin, "invalid operands to comparison operator '" +
                     std::string(binaryOpToString(expr.op)) + "' ('" +
@@ -287,7 +300,7 @@ Type Sema::checkBinaryExpr(BinaryExpr& expr) {
         case BinaryOp::And:
         case BinaryOp::Or: {
             if (isConditionType(lhsType) && isConditionType(rhsType)) {
-                expr.resolvedType = Type::makePred();
+                expr.resolvedType = Type::makeBool();
             } else {
                 diag_.error(expr.range.begin, "logical operator requires boolean or integer operands");
                 expr.resolvedType = Type::makeVoid();
@@ -318,7 +331,7 @@ Type Sema::checkUnaryExpr(UnaryExpr& expr) {
         }
     } else if (expr.op == UnaryOp::Not) {
         if (isConditionType(operandType)) {
-            expr.resolvedType = Type::makePred();
+            expr.resolvedType = Type::makeBool();
         } else {
             diag_.error(expr.range.begin, "unary '!' requires boolean or integer operand");
             expr.resolvedType = Type::makeVoid();
@@ -360,8 +373,9 @@ Type Sema::checkCastExpr(CastExpr& expr) {
         return expr.resolvedType;
     }
 
-    if ((operandType.isInt() || operandType.isFloat()) &&
-        (expr.targetType.isInt() || expr.targetType.isFloat())) {
+    // Explicit casts convert freely among the scalar types: int, float and bool.
+    auto isScalar = [](const Type& t) { return t.isInt() || t.isFloat() || t.isBool(); };
+    if (isScalar(operandType) && isScalar(expr.targetType)) {
         expr.resolvedType = expr.targetType;
     } else {
         diag_.error(expr.range.begin, "invalid cast from '" + operandType.toString() + "' to '" + expr.targetType.toString() + "'");

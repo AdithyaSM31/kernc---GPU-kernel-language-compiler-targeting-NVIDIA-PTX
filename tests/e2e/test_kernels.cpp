@@ -8,6 +8,7 @@
 #include "kernc/PTXEmitter.h"
 #include <vector>
 #include <cmath>
+#include <limits>
 #include <random>
 #include <iostream>
 
@@ -480,6 +481,114 @@ TEST_F(KernelE2ETest, ReturnInsideLoopStopsSearch) {
     CHECK_CUDA(cuMemFree(d_m));
     CHECK_CUDA(cuMemFree(d_out));
     CHECK_CUDA(cuModuleUnload(mod));
+}
+
+// -------------------------------------------------------------
+// bool values
+// -------------------------------------------------------------
+// Each thread computes 13 bool-valued expressions and stores them as ints; the CPU reference
+// uses C++ semantics, including NaN != NaN being true and cast<bool>(NaN) being true.
+static const int kBoolOutputs = 13;
+
+static std::vector<int> runBoolKernel(KernelE2ETest* fixture, bool optimize,
+                                      const std::vector<int>& a, const std::vector<float>& x) {
+    const char* src =
+        "kernel bools(int* a, float* x, int* o, int n) {\n"
+        "    int i = block_idx * block_dim + thread_idx;\n"
+        "    if (i >= n) return;\n"
+        "    int v = a[i];\n"
+        "    float fx = x[i];\n"
+        "    bool pos = v > 0;\n"
+        "    bool even = v % 2 == 0;\n"
+        "    int k = i * 13;\n"
+        "    o[k] = cast<int>(pos);\n"
+        "    o[k + 1] = cast<int>(pos && even);\n"
+        "    o[k + 2] = cast<int>(pos || even);\n"
+        "    o[k + 3] = cast<int>(!pos);\n"
+        "    o[k + 4] = cast<int>(pos == even);\n"
+        "    o[k + 5] = cast<int>(pos != even);\n"
+        "    o[k + 6] = cast<int>(cast<bool>(v));\n"
+        "    o[k + 7] = cast<int>(!v);\n"
+        "    o[k + 8] = cast<int>(cast<bool>(fx));\n"
+        "    o[k + 9] = cast<int>(fx != fx);\n"
+        "    o[k + 10] = cast<int>(cast<float>(true && !false) * 3.0);\n"
+        "    o[k + 11] = cast<int>(fx < 1.0 || v == 0);\n"
+        "    if (v % 2) { o[k + 12] = 1; } else { o[k + 12] = 0; }\n"
+        "}\n";
+    int n = static_cast<int>(a.size());
+    std::vector<int> out;
+    std::string ptx = compileSourceToPTX(src, optimize);
+    EXPECT_FALSE(ptx.empty());
+    if (ptx.empty()) return out;
+    CUmodule mod = fixture->loadPTX(ptx);
+    if (!mod) return out;
+    CUfunction func;
+    EXPECT_EQ(cuModuleGetFunction(&func, mod, "bools"), CUDA_SUCCESS);
+
+    out.assign(n * kBoolOutputs, -1);
+    CUdeviceptr d_a, d_x, d_o;
+    EXPECT_EQ(cuMemAlloc(&d_a, n * sizeof(int)), CUDA_SUCCESS);
+    EXPECT_EQ(cuMemAlloc(&d_x, n * sizeof(float)), CUDA_SUCCESS);
+    EXPECT_EQ(cuMemAlloc(&d_o, out.size() * sizeof(int)), CUDA_SUCCESS);
+    EXPECT_EQ(cuMemcpyHtoD(d_a, a.data(), n * sizeof(int)), CUDA_SUCCESS);
+    EXPECT_EQ(cuMemcpyHtoD(d_x, x.data(), n * sizeof(float)), CUDA_SUCCESS);
+    void* args[] = { &d_a, &d_x, &d_o, &n };
+    EXPECT_EQ(cuLaunchKernel(func, (n + 127) / 128, 1, 1, 128, 1, 1, 0, 0, args, 0), CUDA_SUCCESS);
+    EXPECT_EQ(cuCtxSynchronize(), CUDA_SUCCESS);
+    EXPECT_EQ(cuMemcpyDtoH(out.data(), d_o, out.size() * sizeof(int)), CUDA_SUCCESS);
+    cuMemFree(d_a);
+    cuMemFree(d_x);
+    cuMemFree(d_o);
+    cuModuleUnload(mod);
+    return out;
+}
+
+TEST_F(KernelE2ETest, BoolValuesMatchCpu) {
+    const int n = 333;
+    std::vector<int> a(n);
+    std::vector<float> x(n);
+    for (int i = 0; i < n; ++i) {
+        a[i] = (i % 7) - 3; // negatives, zero, odd and even
+        switch (i % 5) {
+            case 0: x[i] = std::numeric_limits<float>::quiet_NaN(); break;
+            case 1: x[i] = 0.0f; break;
+            case 2: x[i] = -0.0f; break;
+            default: x[i] = static_cast<float>(i) * 0.5f - 40.0f; break;
+        }
+    }
+    std::vector<int> expected(n * kBoolOutputs);
+    for (int i = 0; i < n; ++i) {
+        int v = a[i];
+        float fx = x[i];
+        bool pos = v > 0, even = v % 2 == 0;
+        int* e = &expected[i * kBoolOutputs];
+        e[0] = pos;
+        e[1] = pos && even;
+        e[2] = pos || even;
+        e[3] = !pos;
+        e[4] = pos == even;
+        e[5] = pos != even;
+        e[6] = static_cast<bool>(v);
+        e[7] = !v;
+        e[8] = static_cast<bool>(fx);
+        e[9] = fx != fx;
+        e[10] = 3;
+        e[11] = fx < 1.0f || v == 0;
+        e[12] = (v % 2) != 0; // arithmetic used directly as a condition
+    }
+    const char* names[kBoolOutputs] = {"pos", "&&", "||", "!pos", "==", "!=", "cast<bool>(int)",
+                                       "!int", "cast<bool>(float)", "NaN !=", "cast<float>", "|| mixed",
+                                       "if (v % 2)"};
+    for (bool optimize : {false, true}) {
+        std::vector<int> got = runBoolKernel(this, optimize, a, x);
+        ASSERT_EQ(got.size(), expected.size());
+        for (size_t k = 0; k < got.size(); ++k) {
+            ASSERT_EQ(got[k], expected[k]) << (optimize ? "-O1 " : "-O0 ") << names[k % kBoolOutputs]
+                                           << " for element " << k / kBoolOutputs
+                                           << " (a=" << a[k / kBoolOutputs]
+                                           << ", x=" << x[k / kBoolOutputs] << ")";
+        }
+    }
 }
 
 // -------------------------------------------------------------

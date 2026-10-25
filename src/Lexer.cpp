@@ -18,6 +18,9 @@ const char* Token::kindToString(TokenKind kind) {
         case TokenKind::KW_while:     return "while";
         case TokenKind::KW_for:       return "for";
         case TokenKind::KW_return:    return "return";
+        case TokenKind::KW_bool:      return "bool";
+        case TokenKind::KW_true:      return "true";
+        case TokenKind::KW_false:     return "false";
         case TokenKind::KW_cast:      return "cast";
         case TokenKind::KW_shared:    return "shared";
         case TokenKind::KW_barrier:   return "barrier";
@@ -207,6 +210,9 @@ Token Lexer::lexIdentifierOrKeyword(SourceLocation startLoc) {
     else if (text == "while")  tok.kind = TokenKind::KW_while;
     else if (text == "for")    tok.kind = TokenKind::KW_for;
     else if (text == "return") tok.kind = TokenKind::KW_return;
+    else if (text == "bool")   tok.kind = TokenKind::KW_bool;
+    else if (text == "true")   tok.kind = TokenKind::KW_true;
+    else if (text == "false")  tok.kind = TokenKind::KW_false;
     else if (text == "cast")   tok.kind = TokenKind::KW_cast;
     else if (text == "__shared__" || text == "shared") tok.kind = TokenKind::KW_shared;
     else if (text == "barrier") tok.kind = TokenKind::KW_barrier;

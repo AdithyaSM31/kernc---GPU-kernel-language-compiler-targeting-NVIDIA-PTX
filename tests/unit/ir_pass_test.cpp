@@ -18,9 +18,12 @@ static IRFunction compileToIR(const std::string& src) {
     Lexer lexer(src, &diag);
     Parser parser(lexer, diag);
     auto program = parser.parseProgram();
-    EXPECT_TRUE(program != nullptr);
+    EXPECT_TRUE(program != nullptr) << diag.formatAll();
+    if (!program) return IRFunction{};
     Sema sema(diag);
-    EXPECT_TRUE(sema.checkProgram(*program));
+    bool ok = sema.checkProgram(*program);
+    EXPECT_TRUE(ok) << diag.formatAll();
+    if (!ok) return IRFunction{}; // IRGen assumes a well-typed AST
     IRGen irgen(diag);
     return irgen.emitKernel(*program->kernels[0]);
 }
@@ -262,6 +265,37 @@ TEST(IRPassTest, ReturnTerminatesItsBasicBlock) {
         }
     }
     EXPECT_GE(rets, 3) << fn.dump(); // two explicit returns plus the implicit one at the end
+}
+
+TEST(IRPassTest, ComparisonAsValueLowersToSetpIntoPredicate) {
+    // Previously a comparison in value context fell through to the default case and
+    // emitted an add. It must setp straight into a .pred register, and a bool used as a
+    // condition must branch on that register without re-testing it against zero.
+    auto fn = compileToIR("kernel t(int* o, int n) {\n"
+                          "    bool b = n < 10;\n"
+                          "    if (b) { o[0] = 1; }\n"
+                          "}\n");
+    EXPECT_EQ(countOps(fn, IROp::Add), 0) << fn.dump();
+    EXPECT_EQ(countOps(fn, IROp::SetpNe), 0) << fn.dump();
+    bool setpIntoPred = false;
+    for (const auto& bb : fn.blocks)
+        for (const auto& inst : bb.instructions)
+            if (inst.op == IROp::SetpLt && fn.regType(inst.dst) == IRType::Pred) setpIntoPred = true;
+    EXPECT_TRUE(setpIntoPred) << fn.dump();
+}
+
+TEST(IRPassTest, ShortCircuitValueGuardsLoad) {
+    // `ok = i < n && a[i] > 0` must not load a[i] unless i < n, so no load may appear before
+    // the first branch (i.e. in the entry block).
+    auto fn = compileToIR("kernel t(int* a, int n) {\n"
+                          "    bool ok = thread_idx < n && a[thread_idx] > 0;\n"
+                          "    if (ok) { a[0] = 1; }\n"
+                          "}\n");
+    ASSERT_FALSE(fn.blocks.empty());
+    for (const auto& inst : fn.blocks[0].instructions) {
+        EXPECT_NE(inst.op, IROp::Load) << "load before the short-circuit branch:\n" << fn.dump();
+    }
+    EXPECT_GE(countOps(fn, IROp::Load), 1) << fn.dump();
 }
 
 TEST(IRPassTest, PTXEmissionValidStructure) {

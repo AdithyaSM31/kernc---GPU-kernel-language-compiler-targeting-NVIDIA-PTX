@@ -32,6 +32,11 @@ private:
     VReg emitBuiltin(const BuiltinExpr& expr, IRFunction& fn);
 
     void emitCondition(const Expr& cond, const Label& trueLabel, const Label& falseLabel, IRFunction& fn);
+    void emitBranch(VReg pred, const Label& trueLabel, const Label& falseLabel, IRFunction& fn);
+    VReg emitCompare(const BinaryExpr& bin, IRFunction& fn);
+    VReg emitAsPred(const Expr& expr, IRFunction& fn);
+    VReg emitShortCircuitValue(const BinaryExpr& expr, IRFunction& fn);
+    static bool isComparison(BinaryOp op);
 
     struct VarInfo {
         VReg reg;
