@@ -392,6 +392,97 @@ TEST_F(KernelE2ETest, ReLU_Small_33) {
 }
 
 // -------------------------------------------------------------
+// Early return
+// -------------------------------------------------------------
+// Launches more threads than elements; threads past n must return before touching memory.
+TEST_F(KernelE2ETest, EarlyReturnGuardSkipsExtraThreads) {
+    std::string src = "kernel early_exit(int* in, int* out, int n) {\n"
+                      "    int i = block_idx * block_dim + thread_idx;\n"
+                      "    if (i >= n) return;\n"
+                      "    out[i] = in[i] * 2;\n"
+                      "}\n";
+    std::string ptx = compileSourceToPTX(src);
+    ASSERT_FALSE(ptx.empty());
+    CUmodule mod = loadPTX(ptx);
+    ASSERT_NE(mod, nullptr);
+    CUfunction func;
+    CHECK_CUDA(cuModuleGetFunction(&func, mod, "early_exit"));
+
+    int n = 1000;
+    const int blockSize = 256, gridSize = 4, total = blockSize * gridSize; // 1024 threads
+    const int sentinel = -7;
+    std::vector<int> h_in(total), h_out(total, sentinel);
+    for (int k = 0; k < total; ++k) h_in[k] = k;
+
+    CUdeviceptr d_in, d_out;
+    CHECK_CUDA(cuMemAlloc(&d_in, total * sizeof(int)));
+    CHECK_CUDA(cuMemAlloc(&d_out, total * sizeof(int)));
+    CHECK_CUDA(cuMemcpyHtoD(d_in, h_in.data(), total * sizeof(int)));
+    CHECK_CUDA(cuMemcpyHtoD(d_out, h_out.data(), total * sizeof(int)));
+    void* args[] = { &d_in, &d_out, &n };
+    CHECK_CUDA(cuLaunchKernel(func, gridSize, 1, 1, blockSize, 1, 1, 0, 0, args, 0));
+    CHECK_CUDA(cuCtxSynchronize());
+    CHECK_CUDA(cuMemcpyDtoH(h_out.data(), d_out, total * sizeof(int)));
+
+    for (int k = 0; k < total; ++k) {
+        int expected = (k < n) ? 2 * k : sentinel;
+        ASSERT_EQ(h_out[k], expected) << "index " << k;
+    }
+    CHECK_CUDA(cuMemFree(d_in));
+    CHECK_CUDA(cuMemFree(d_out));
+    CHECK_CUDA(cuModuleUnload(mod));
+}
+
+// A return inside a loop must leave the loop and skip the statement after it.
+TEST_F(KernelE2ETest, ReturnInsideLoopStopsSearch) {
+    std::string src = "kernel find_first(int* m, int* out, int rows, int cols, int target) {\n"
+                      "    int r = block_idx * block_dim + thread_idx;\n"
+                      "    if (r >= rows) return;\n"
+                      "    for (int c = 0; c < cols; c = c + 1) {\n"
+                      "        if (m[r * cols + c] == target) {\n"
+                      "            out[r] = c;\n"
+                      "            return;\n"
+                      "        }\n"
+                      "    }\n"
+                      "    out[r] = -2;\n"
+                      "}\n";
+    std::string ptx = compileSourceToPTX(src);
+    ASSERT_FALSE(ptx.empty());
+    CUmodule mod = loadPTX(ptx);
+    ASSERT_NE(mod, nullptr);
+    CUfunction func;
+    CHECK_CUDA(cuModuleGetFunction(&func, mod, "find_first"));
+
+    int rows = 300, cols = 50, target = 7;
+    std::vector<int> h_m(rows * cols), h_out(rows, -1);
+    for (int k = 0; k < rows * cols; ++k) h_m[k] = (k * 31 + k / cols) % 97;
+
+    CUdeviceptr d_m, d_out;
+    CHECK_CUDA(cuMemAlloc(&d_m, h_m.size() * sizeof(int)));
+    CHECK_CUDA(cuMemAlloc(&d_out, h_out.size() * sizeof(int)));
+    CHECK_CUDA(cuMemcpyHtoD(d_m, h_m.data(), h_m.size() * sizeof(int)));
+    void* args[] = { &d_m, &d_out, &rows, &cols, &target };
+    CHECK_CUDA(cuLaunchKernel(func, (rows + 127) / 128, 1, 1, 128, 1, 1, 0, 0, args, 0));
+    CHECK_CUDA(cuCtxSynchronize());
+    CHECK_CUDA(cuMemcpyDtoH(h_out.data(), d_out, h_out.size() * sizeof(int)));
+
+    int found = 0;
+    for (int r = 0; r < rows; ++r) {
+        int expected = -2;
+        for (int c = 0; c < cols; ++c) {
+            if (h_m[r * cols + c] == target) { expected = c; break; }
+        }
+        if (expected >= 0) ++found;
+        ASSERT_EQ(h_out[r], expected) << "row " << r;
+    }
+    EXPECT_GT(found, 0);          // the data must exercise both paths
+    EXPECT_LT(found, rows);
+    CHECK_CUDA(cuMemFree(d_m));
+    CHECK_CUDA(cuMemFree(d_out));
+    CHECK_CUDA(cuModuleUnload(mod));
+}
+
+// -------------------------------------------------------------
 // Differential test: the optimizer must not change observable results
 // -------------------------------------------------------------
 // Each output is a constant expression, so -O1 folds it inside kernc while -O0 leaves it to

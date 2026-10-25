@@ -200,6 +200,12 @@ struct ExprStmt : public Stmt {
 
 struct BarrierStmt : public Stmt {};
 
+// Kernels return void; the value is parsed anyway so Sema can report it clearly.
+struct ReturnStmt : public Stmt {
+    std::unique_ptr<Expr> value; // can be nullptr
+    explicit ReturnStmt(std::unique_ptr<Expr> v = nullptr) : value(std::move(v)) {}
+};
+
 // Kernel / Top-level
 struct Param {
     Type type;

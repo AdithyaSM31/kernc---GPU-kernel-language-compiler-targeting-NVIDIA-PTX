@@ -1,0 +1,4 @@
+// Expected error: 3:12: error: kernel 'test' cannot return a value
+kernel test(int n) {
+    return n;
+}

@@ -15,6 +15,7 @@ bool Sema::checkProgram(Program& program) {
 }
 
 bool Sema::checkKernel(KernelDecl& kernel) {
+    currentKernel_ = kernel.name;
     symTable_.enterScope();
 
     for (const auto& param : kernel.params) {
@@ -52,6 +53,12 @@ void Sema::checkStmt(Stmt& stmt) {
         checkExpr(*exprStmt->expr);
     } else if (dynamic_cast<BarrierStmt*>(&stmt)) {
         // barrier() takes no args, returns void
+    } else if (auto* ret = dynamic_cast<ReturnStmt*>(&stmt)) {
+        if (ret->value) {
+            checkExpr(*ret->value);
+            diag_.error(ret->value->range.begin,
+                        "kernel '" + currentKernel_ + "' cannot return a value (kernels return void)");
+        }
     }
 }
 

@@ -101,6 +101,11 @@ void IRGen::emitStmt(const Stmt& stmt, IRFunction& fn) {
         emitExpr(*exprStmt->expr, fn);
     } else if (dynamic_cast<const BarrierStmt*>(&stmt)) {
         fn.emit(IRInst{IROp::Bar, 0, 0, 0, IRType::S32});
+    } else if (dynamic_cast<const ReturnStmt*>(&stmt)) {
+        // ret in a .entry ends this thread. It terminates the block, so any statements after
+        // it go into a new block that nothing branches to (unreachable, but well-formed).
+        fn.emit(IRInst{IROp::Ret, 0, 0, 0, IRType::S32});
+        fn.addBlock(fn.freshLabel("L_after_ret"));
     }
 }
 

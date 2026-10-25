@@ -37,4 +37,6 @@
 - Assignments: `x = expr;`, `ptr[idx] = expr;`.
 - Conditional: `if (cond) { ... } else { ... }`.
 - Loops: `while (cond) { ... }`, `for (init; cond; step) { ... }`.
+- Return: `return;` -> `ret;`, which ends the calling thread (other threads continue).
+  Kernels return void, so `return expr;` is an error.
 - Synchronization: `barrier();` -> `bar.sync 0;`.

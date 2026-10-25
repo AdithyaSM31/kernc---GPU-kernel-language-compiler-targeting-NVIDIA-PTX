@@ -1,0 +1,11 @@
+// Returns at the top level, inside an if, inside a loop, and with unreachable code after it.
+kernel early_return(int* out, int n) {
+    int i = thread_idx;
+    if (i >= n) return;
+    while (i < n) {
+        if (out[i] == 0) { return; }
+        i = i + 32;
+    }
+    return;
+    out[0] = 1;
+}

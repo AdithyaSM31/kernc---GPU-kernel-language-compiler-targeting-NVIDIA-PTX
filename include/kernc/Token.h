@@ -20,6 +20,7 @@ enum class TokenKind {
     KW_else,
     KW_while,
     KW_for,
+    KW_return,
     KW_cast,
     KW_shared,
     KW_barrier,

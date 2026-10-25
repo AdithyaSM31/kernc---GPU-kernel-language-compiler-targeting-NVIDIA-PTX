@@ -111,6 +111,25 @@ TEST(SemaTest, IntLiteralsBeyondS32Rejected) {
     }
 }
 
+TEST(SemaTest, BareReturnAccepted) {
+    std::string src = "kernel test(int* o, int n) {\n"
+                      "    if (thread_idx >= n) return;\n"
+                      "    o[thread_idx] = 1;\n"
+                      "}\n";
+    DiagnosticsEngine diag;
+    EXPECT_TRUE(checkSource(src, diag)) << diag.formatAll();
+}
+
+TEST(SemaTest, ReturnWithValueRejected) {
+    std::string src = "kernel test(int n) {\n"
+                      "    return n + 1;\n"
+                      "}\n";
+    DiagnosticsEngine diag;
+    EXPECT_FALSE(checkSource(src, diag));
+    EXPECT_NE(diag.formatAll().find("2:12: error: kernel 'test' cannot return a value"),
+              std::string::npos) << diag.formatAll();
+}
+
 TEST(SemaTest, NonIntSubscript) {
     std::string src = "kernel test(float* p) {\n"
                       "    float y = p[1.5];\n"

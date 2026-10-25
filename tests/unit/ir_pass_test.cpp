@@ -238,6 +238,32 @@ TEST(IRPassTest, EdgeIntLiteralsLowerToTwosComplementBits) {
     EXPECT_EQ(v[2], INT32_MIN);
 }
 
+static bool isTerminator(IROp op) {
+    return op == IROp::Bra || op == IROp::BraCond || op == IROp::Ret;
+}
+
+TEST(IRPassTest, ReturnTerminatesItsBasicBlock) {
+    // CFG invariant: a terminator may only appear as the last instruction of a block, even
+    // when source code follows the return.
+    auto fn = compileToIR("kernel t(int* o, int n) {\n"
+                          "    if (thread_idx >= n) return;\n"
+                          "    o[0] = 1;\n"
+                          "    return;\n"
+                          "    o[1] = 2;\n"
+                          "}\n");
+    int rets = 0;
+    for (const auto& bb : fn.blocks) {
+        for (size_t k = 0; k < bb.instructions.size(); ++k) {
+            if (bb.instructions[k].op == IROp::Ret) ++rets;
+            if (isTerminator(bb.instructions[k].op)) {
+                EXPECT_EQ(k + 1, bb.instructions.size())
+                    << "terminator in the middle of block " << bb.label << ":\n" << fn.dump();
+            }
+        }
+    }
+    EXPECT_GE(rets, 3) << fn.dump(); // two explicit returns plus the implicit one at the end
+}
+
 TEST(IRPassTest, PTXEmissionValidStructure) {
     std::string src = "kernel vecadd(int* a, int* b, int* c, int n) {\n"
                       "    int i = block_idx * block_dim + thread_idx;\n"

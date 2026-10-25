@@ -123,6 +123,9 @@ std::unique_ptr<Stmt> Parser::parseStmt() {
     if (check(TokenKind::KW_for)) {
         return parseForStmt();
     }
+    if (check(TokenKind::KW_return)) {
+        return parseReturnStmt();
+    }
     if (check(TokenKind::LBrace)) {
         return parseBlock();
     }
@@ -189,6 +192,20 @@ std::unique_ptr<Stmt> Parser::parseWhileStmt() {
     consume(TokenKind::RParen, "expected ')' after while condition");
     auto body = parseStmt();
     auto stmt = std::make_unique<WhileStmt>(std::move(cond), std::move(body));
+    stmt->range = {startLoc, current_.loc};
+    return stmt;
+}
+
+std::unique_ptr<Stmt> Parser::parseReturnStmt() {
+    SourceLocation startLoc = current_.loc;
+    consume(TokenKind::KW_return, "expected 'return'");
+    std::unique_ptr<Expr> value = nullptr;
+    if (!check(TokenKind::Semicolon)) {
+        value = parseExpr();
+        if (!value) return nullptr;
+    }
+    consume(TokenKind::Semicolon, "expected ';' after 'return'");
+    auto stmt = std::make_unique<ReturnStmt>(std::move(value));
     stmt->range = {startLoc, current_.loc};
     return stmt;
 }

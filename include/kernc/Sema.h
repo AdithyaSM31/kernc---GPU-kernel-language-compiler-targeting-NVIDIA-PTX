@@ -79,6 +79,7 @@ private:
 
     DiagnosticsEngine& diag_;
     SymbolTable symTable_;
+    std::string currentKernel_; // for diagnostics such as "kernel 'k' cannot return a value"
 };
 
 } // namespace kernc

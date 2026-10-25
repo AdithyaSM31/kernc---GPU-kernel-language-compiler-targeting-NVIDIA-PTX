@@ -140,3 +140,28 @@ TEST(ParserTest, ControlFlowStatements) {
     ASSERT_NE(forStmt->cond, nullptr);
     ASSERT_NE(forStmt->step, nullptr);
 }
+
+TEST(ParserTest, ReturnStatement) {
+    std::string src = "kernel test(int n) {\n"
+                      "    if (n > 0) return;\n"
+                      "    return n;\n"
+                      "}\n";
+    DiagnosticsEngine diag;
+    Lexer lexer(src, &diag);
+    Parser parser(lexer, diag);
+    auto k = parser.parseKernel();
+    ASSERT_NE(k, nullptr) << diag.formatAll();
+    EXPECT_FALSE(diag.hasErrors()) << diag.formatAll();
+    ASSERT_EQ(k->body.size(), 2u);
+
+    auto* ifStmt = dynamic_cast<IfStmt*>(k->body[0].get());
+    ASSERT_NE(ifStmt, nullptr);
+    auto* bare = dynamic_cast<ReturnStmt*>(ifStmt->thenBranch.get());
+    ASSERT_NE(bare, nullptr);
+    EXPECT_EQ(bare->value, nullptr);
+
+    // A value is parsed (and later rejected by Sema), not treated as a syntax error.
+    auto* withValue = dynamic_cast<ReturnStmt*>(k->body[1].get());
+    ASSERT_NE(withValue, nullptr);
+    EXPECT_NE(dynamic_cast<IdentExpr*>(withValue->value.get()), nullptr);
+}
