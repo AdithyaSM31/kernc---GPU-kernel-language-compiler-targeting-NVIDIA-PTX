@@ -59,7 +59,9 @@ struct Expr : public ASTNode {
 
 struct IntLiteralExpr : public Expr {
     int64_t value = 0;
-    explicit IntLiteralExpr(int64_t val) : value(val) {
+    std::string spelling; // source text, e.g. "0xFF"; Sema needs to know hex vs decimal
+    explicit IntLiteralExpr(int64_t val, std::string spell = "")
+        : value(val), spelling(std::move(spell)) {
         resolvedType = Type::makeInt();
     }
 };

@@ -226,6 +226,18 @@ TEST(IRPassTest, FoldLeavesIntMinDivideByMinusOneToHardware) {
     EXPECT_EQ(countOps(fn, IROp::Mod), 1) << fn.dump();
 }
 
+TEST(IRPassTest, EdgeIntLiteralsLowerToTwosComplementBits) {
+    auto v = storedConstants("kernel t(int* o) {\n"
+                             "    o[0] = -2147483648;\n"
+                             "    o[1] = 0xFFFFFFFF;\n"
+                             "    o[2] = 0x80000000;\n"
+                             "}\n");
+    ASSERT_EQ(v.size(), 3u);
+    EXPECT_EQ(v[0], INT32_MIN);
+    EXPECT_EQ(v[1], -1);
+    EXPECT_EQ(v[2], INT32_MIN);
+}
+
 TEST(IRPassTest, PTXEmissionValidStructure) {
     std::string src = "kernel vecadd(int* a, int* b, int* c, int n) {\n"
                       "    int i = block_idx * block_dim + thread_idx;\n"

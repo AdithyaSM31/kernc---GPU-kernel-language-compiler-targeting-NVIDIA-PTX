@@ -368,7 +368,7 @@ std::unique_ptr<Expr> Parser::parsePrimary() {
 
     if (check(TokenKind::IntLiteral)) {
         Token tok = advance();
-        expr = std::make_unique<IntLiteralExpr>(tok.intVal);
+        expr = std::make_unique<IntLiteralExpr>(tok.intVal, std::string(tok.text));
         expr->range = {tok.loc, tok.loc};
     } else if (check(TokenKind::FloatLiteral)) {
         Token tok = advance();

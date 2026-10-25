@@ -1,0 +1,4 @@
+// Expected error: 3:12: error: integer literal '3000000000' is out of range for type 'int'
+kernel test(int* o) {
+    o[0] = 3000000000;
+}

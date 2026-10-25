@@ -71,6 +71,7 @@ private:
     Type checkIndexExpr(IndexExpr& expr);
     Type checkCastExpr(CastExpr& expr);
     Type checkIdentExpr(IdentExpr& expr);
+    Type checkIntLiteral(IntLiteralExpr& expr, bool negated);
 
     bool isConditionType(const Type& t) const {
         return t.isPred() || t.isInt();

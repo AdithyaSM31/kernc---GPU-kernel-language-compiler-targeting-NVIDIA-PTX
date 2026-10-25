@@ -164,9 +164,8 @@ void Sema::checkBlock(BlockStmt& stmt) {
 }
 
 Type Sema::checkExpr(Expr& expr) {
-    if (dynamic_cast<IntLiteralExpr*>(&expr)) {
-        expr.resolvedType = Type::makeInt();
-        return expr.resolvedType;
+    if (auto* lit = dynamic_cast<IntLiteralExpr*>(&expr)) {
+        return checkIntLiteral(*lit, /*negated=*/false);
     }
     if (dynamic_cast<FloatLiteralExpr*>(&expr)) {
         expr.resolvedType = Type::makeFloat();
@@ -202,6 +201,21 @@ Type Sema::checkIdentExpr(IdentExpr& expr) {
         return expr.resolvedType;
     }
     expr.resolvedType = *t;
+    return expr.resolvedType;
+}
+
+// Range rule for 32-bit int literals (same as Java, JLS 3.10.1):
+//  - decimal: at most 2147483647, or 2147483648 when it is the operand of unary minus;
+//  - hex: at most 0xFFFFFFFF, read as a two's-complement bit pattern (0xFFFFFFFF == -1).
+// The literal still has type 'int' when out of range, so no follow-on errors are reported.
+Type Sema::checkIntLiteral(IntLiteralExpr& expr, bool negated) {
+    bool isHex = expr.spelling.size() > 1 && (expr.spelling[1] == 'x' || expr.spelling[1] == 'X');
+    int64_t max = isHex ? 0xFFFFFFFFLL : (negated ? 2147483648LL : 2147483647LL);
+    if (expr.value > max) {
+        diag_.error(expr.range.begin, "integer literal '" + expr.spelling +
+                    "' is out of range for type 'int'");
+    }
+    expr.resolvedType = Type::makeInt();
     return expr.resolvedType;
 }
 
@@ -278,7 +292,11 @@ Type Sema::checkBinaryExpr(BinaryExpr& expr) {
 }
 
 Type Sema::checkUnaryExpr(UnaryExpr& expr) {
-    Type operandType = checkExpr(*expr.operand);
+    // "-2147483648" lexes as minus applied to 2147483648, so the literal's range depends on
+    // whether it is negated.
+    auto* lit = dynamic_cast<IntLiteralExpr*>(expr.operand.get());
+    Type operandType = (expr.op == UnaryOp::Neg && lit) ? checkIntLiteral(*lit, /*negated=*/true)
+                                                        : checkExpr(*expr.operand);
     if (operandType.isVoid()) {
         expr.resolvedType = Type::makeVoid();
         return expr.resolvedType;

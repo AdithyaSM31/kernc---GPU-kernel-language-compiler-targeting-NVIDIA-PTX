@@ -13,6 +13,10 @@
 
 ### Literals
 - Integers: Decimal (`0`, `42`, `1000`) and hexadecimal (`0x10`, `0xFF`).
+  - Range (same rule as Java): a decimal literal must be at most `2147483647`, except that
+    `2147483648` is allowed as the operand of unary minus, so `-2147483648` is INT_MIN.
+    A hex literal may be up to `0xFFFFFFFF` and is read as a 32-bit two's-complement bit
+    pattern (`0xFFFFFFFF` is `-1`, `0x80000000` is INT_MIN). Larger literals are errors.
 - Floats: Standard decimal and scientific notation (`3.14`, `1.0f`, `.5`, `1e-3`, `2.5e+2`).
 
 ### Built-in Identifiers

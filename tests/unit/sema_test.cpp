@@ -85,6 +85,32 @@ TEST(SemaTest, SubscriptNonPointer) {
     EXPECT_NE(diag.formatAll().find("subscripted value is not a pointer"), std::string::npos);
 }
 
+TEST(SemaTest, IntLiteralsAtS32EdgesAccepted) {
+    // INT_MAX, INT_MIN written as -2147483648, and hex bit patterns up to 0xFFFFFFFF.
+    std::string src = "kernel test(int* o) {\n"
+                      "    o[0] = 2147483647;\n"
+                      "    o[1] = -2147483648;\n"
+                      "    o[2] = 0xFFFFFFFF;\n"
+                      "    o[3] = 0x80000000;\n"
+                      "}\n";
+    DiagnosticsEngine diag;
+    EXPECT_TRUE(checkSource(src, diag)) << diag.formatAll();
+}
+
+TEST(SemaTest, IntLiteralsBeyondS32Rejected) {
+    // 2147483648 is only allowed as the operand of unary minus.
+    for (std::string lit : {"2147483648", "3000000000", "0x100000000", "99999999999999999999"}) {
+        std::string src = "kernel test(int* o) {\n"
+                          "    o[0] = " + lit + ";\n"
+                          "}\n";
+        DiagnosticsEngine diag;
+        EXPECT_FALSE(checkSource(src, diag)) << lit;
+        EXPECT_NE(diag.formatAll().find("2:12: error: integer literal '" + lit +
+                                        "' is out of range for type 'int'"),
+                  std::string::npos) << diag.formatAll();
+    }
+}
+
 TEST(SemaTest, NonIntSubscript) {
     std::string src = "kernel test(float* p) {\n"
                       "    float y = p[1.5];\n"
