@@ -44,14 +44,14 @@ IRFunction IRGen::emitFunction(const FunctionDecl& kernel) {
     fn.name = kernel.name;
     fn.params = kernel.params;
 
-    fn.addBlock("entry");
+    fn.addBlock(ptxname::kEntryLabel);
     enterScope();
 
     // Load parameters in prologue; attributed to the kernel's own line.
     fn.currentLoc = kernel.range.begin;
     for (size_t i = 0; i < kernel.params.size(); ++i) {
         const auto& param = kernel.params[i];
-        std::string paramPtxName = kernel.name + "_param_" + std::to_string(i);
+        std::string paramPtxName = ptxname::param(kernel.name, i);
 
         if (param.type.isPtr()) {
             if (kernel.isKernel) {
@@ -163,7 +163,7 @@ void IRGen::emitStmtBody(const Stmt& stmt, IRFunction& fn) {
                 valReg = s32Reg;
             }
             IRInst stRet{IROp::StoreRetval, 0, valReg, 0, fn.regType(valReg)};
-            stRet.symbol = fn.name + "_retval";
+            stRet.symbol = ptxname::retval(fn.name);
             fn.emit(stRet);
         }
         fn.emit(IRInst{IROp::Ret, 0, 0, 0, IRType::S32});
@@ -214,16 +214,17 @@ void IRGen::emitAssign(const AssignStmt& stmt, IRFunction& fn) {
 }
 
 void IRGen::emitSharedDecl(const SharedDeclStmt& stmt, IRFunction& fn) {
-    // Module-scope symbol named after the kernel, made unique if the same name is declared
-    // again in another scope of this kernel.
-    std::string symbol = fn.name + "_" + stmt.name;
+    // Module-scope symbol <kernel>$<array>. The '$' keeps it apart from every source name and
+    // from other kernels' arrays (kernel names cannot contain '$'). A second array with the
+    // same name in another scope of this kernel gets a "$<n>" suffix.
+    std::string symbol = ptxname::shared(fn.name, stmt.name);
     auto taken = [&](const std::string& s) {
         for (const auto& sv : fn.sharedVars)
             if (sv.symbol == s) return true;
         return false;
     };
     for (int n = 1; taken(symbol); ++n) {
-        symbol = fn.name + "_" + stmt.name + "_" + std::to_string(n);
+        symbol = ptxname::shared(fn.name, stmt.name) + "$" + std::to_string(n);
     }
     fn.sharedVars.push_back({symbol, toIRType(stmt.elemType), stmt.size});
     setVar(stmt.name, 0, Type::makeSharedArray(stmt.elemType.kind), symbol);

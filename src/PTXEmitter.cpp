@@ -54,18 +54,26 @@ static std::string ptxParamType(const Type& t) {
     return ".b32";
 }
 
-static std::string emitPrototype(const IRFunction& fn) {
+// `.func (.param .t f$retval) f(.param .t f$param_0, ...)`: shared by the prototype and the
+// definition so the two can never disagree.
+static std::string funcHeader(const IRFunction& fn) {
     std::ostringstream ss;
     ss << ".func ";
     if (!fn.returnType.isVoid()) {
-        ss << "(.param " << ptxParamType(fn.returnType) << " " << fn.name << "_retval) ";
+        ss << "(.param " << ptxParamType(fn.returnType) << " " << ptxname::retval(fn.name) << ") ";
     }
     ss << fn.name << "(";
     for (size_t i = 0; i < fn.params.size(); ++i) {
         if (i > 0) ss << ", ";
-        ss << ".param " << ptxParamType(fn.params[i].type) << " " << fn.name << "_param_" << i;
+        ss << ".param " << ptxParamType(fn.params[i].type) << " " << ptxname::param(fn.name, i);
     }
-    ss << ");";
+    ss << ")";
+    return ss.str();
+}
+
+static std::string emitPrototype(const IRFunction& fn) {
+    std::ostringstream ss;
+    ss << funcHeader(fn) << ";";
     return ss.str();
 }
 
@@ -140,7 +148,7 @@ std::string PTXEmitter::emitFunction(const IRFunction& fn) {
             } else {
                 ss << ".s32 ";
             }
-            ss << fn.name << "_param_" << i;
+            ss << ptxname::param(fn.name, i);
             if (i + 1 < fn.params.size()) {
                 ss << ",";
             }
@@ -148,16 +156,7 @@ std::string PTXEmitter::emitFunction(const IRFunction& fn) {
         }
         ss << ")\n{\n";
     } else {
-        ss << ".func ";
-        if (!fn.returnType.isVoid()) {
-            ss << "(.param " << ptxParamType(fn.returnType) << " " << fn.name << "_retval) ";
-        }
-        ss << fn.name << "(";
-        for (size_t i = 0; i < fn.params.size(); ++i) {
-            if (i > 0) ss << ", ";
-            ss << ".param " << ptxParamType(fn.params[i].type) << " " << fn.name << "_param_" << i;
-        }
-        ss << ")\n{\n";
+        ss << funcHeader(fn) << "\n{\n";
     }
 
     // Register declarations
@@ -335,27 +334,22 @@ std::string PTXEmitter::emitFunction(const IRFunction& fn) {
                         std::string argStr = alloc.get(argReg);
                         IRType argTy = fn.regType(argReg);
                         const char* tyStr = (argTy == IRType::F32) ? ".f32" : ((argTy == IRType::S64) ? ".b64" : ".b32");
-                        ss << "        .param " << tyStr << " param" << i << ";\n";
-                        ss << "        st.param" << tyStr << " [param" << i << "], " << argStr << ";\n";
+                        ss << "        .param " << tyStr << " " << ptxname::callArg(i) << ";\n";
+                        ss << "        st.param" << tyStr << " [" << ptxname::callArg(i) << "], " << argStr << ";\n";
+                    }
+                    std::ostringstream argList;
+                    for (size_t i = 0; i < inst.args.size(); ++i) {
+                        argList << (i > 0 ? ", " : "") << ptxname::callArg(i);
                     }
                     if (inst.dst != 0) {
                         IRType retTy = fn.regType(inst.dst);
                         const char* tyStr = (retTy == IRType::F32) ? ".f32" : ((retTy == IRType::S64) ? ".b64" : ".b32");
-                        ss << "        .param " << tyStr << " retval0;\n";
-                        ss << "        call (retval0), " << inst.symbol << ", (";
-                        for (size_t i = 0; i < inst.args.size(); ++i) {
-                            if (i > 0) ss << ", ";
-                            ss << "param" << i;
-                        }
-                        ss << ");\n";
-                        ss << "        ld.param" << tyStr << " " << dst << ", [retval0];\n";
+                        ss << "        .param " << tyStr << " " << ptxname::kCallRet << ";\n";
+                        ss << "        call (" << ptxname::kCallRet << "), " << inst.symbol << ", ("
+                           << argList.str() << ");\n";
+                        ss << "        ld.param" << tyStr << " " << dst << ", [" << ptxname::kCallRet << "];\n";
                     } else {
-                        ss << "        call " << inst.symbol << ", (";
-                        for (size_t i = 0; i < inst.args.size(); ++i) {
-                            if (i > 0) ss << ", ";
-                            ss << "param" << i;
-                        }
-                        ss << ");\n";
+                        ss << "        call " << inst.symbol << ", (" << argList.str() << ");\n";
                     }
                     ss << "    }\n";
                     break;
@@ -363,7 +357,7 @@ std::string PTXEmitter::emitFunction(const IRFunction& fn) {
 
                 case IROp::StoreRetval: {
                     std::string retTy = ptxParamType(fn.returnType);
-                    ss << "    st.param" << retTy << " [" << fn.name << "_retval], " << s1 << ";\n";
+                    ss << "    st.param" << retTy << " [" << ptxname::retval(fn.name) << "], " << s1 << ";\n";
                     break;
                 }
 

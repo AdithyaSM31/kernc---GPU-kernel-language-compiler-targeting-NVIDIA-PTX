@@ -18,7 +18,9 @@ if (CUDA_FOUND AND CUDA_DRIVER_LIB)
     )
     target_include_directories(kernc_e2e_tests PRIVATE ${CUDA_INCLUDE_DIRS})
     target_link_libraries(kernc_e2e_tests PRIVATE GTest::GTest kernc_lib ${CUDA_DRIVER_LIB})
-    target_compile_definitions(kernc_e2e_tests PRIVATE KERNC_EXAMPLES_DIR="${CMAKE_SOURCE_DIR}/examples")
+    target_compile_definitions(kernc_e2e_tests PRIVATE
+        KERNC_EXAMPLES_DIR="${CMAKE_SOURCE_DIR}/examples"
+        KERNC_REGRESS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/regress")
     gtest_discover_tests(kernc_e2e_tests)
 endif()
 

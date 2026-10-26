@@ -11,6 +11,19 @@ namespace kernc {
 using VReg = uint32_t;
 using Label = std::string;
 
+// Names kernc generates in the PTX. Each contains '$', which PTX identifiers allow but .kern
+// identifiers do not, so a generated name can never collide with a kernel, function or array
+// name from the source (e.g. a function called `entry` or `f_retval`).
+namespace ptxname {
+inline const char* kEntryLabel = "$entry";
+inline std::string label(const std::string& hint, uint32_t n) { return "$" + hint + "_" + std::to_string(n); }
+inline std::string param(const std::string& fn, size_t i) { return fn + "$param_" + std::to_string(i); }
+inline std::string retval(const std::string& fn) { return fn + "$retval"; }
+inline std::string shared(const std::string& fn, const std::string& array) { return fn + "$" + array; }
+inline std::string callArg(size_t i) { return "$arg" + std::to_string(i); } // call-site .param
+inline const char* kCallRet = "$ret";                                        // call-site .param
+} // namespace ptxname
+
 enum class IRType {
     S32,
     F32,
@@ -62,7 +75,7 @@ enum class IROp {
     Ret,
     // Device Functions
     Call,        // dst (0 for void) = call `symbol`(args...); dst/args use ABI types (no .pred)
-    StoreRetval, // st.param [<function>_retval], src1
+    StoreRetval, // st.param [<function>$retval], src1
 
     // GPU Specific
     ReadSReg,
@@ -138,7 +151,7 @@ struct IRFunction {
     }
 
     Label freshLabel(const std::string& hint = "L") {
-        return hint + "_" + std::to_string(nextLabel++);
+        return ptxname::label(hint, nextLabel++);
     }
 
     BasicBlock* currentBlock() {
@@ -155,7 +168,7 @@ struct IRFunction {
 
     void emit(const IRInst& inst) {
         if (blocks.empty()) {
-            addBlock("entry");
+            addBlock(ptxname::kEntryLabel);
         }
         blocks.back().instructions.push_back(inst);
         blocks.back().instructions.back().srcLoc = currentLoc;

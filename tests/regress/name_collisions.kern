@@ -1,0 +1,47 @@
+// Every function and array name below is one kernc used to generate for its own PTX symbols:
+// block labels (entry, L_then_0), .param names (k_param_0, f_retval), call-site temporaries
+// (param0, retval0) and shared-array symbols (k_buf; k + b_uf vs k_b + uf). Generated names
+// now contain '$', which .kern identifiers cannot, so none of these may collide.
+// tests/e2e also runs these kernels and checks the values in the comments.
+func int entry(int a) { return a + 1; }
+func int L_then_0(int a) {
+    if (a > 0) {
+        return a * 2;
+    }
+    return 0;
+}
+func int f_retval(int a) { return a + 10; }
+func int f(int a) { return f_retval(a); }
+func int param0(int a) { return a + 100; }
+func int retval0(int a) { return param0(a) + 1000; }
+func int k_buf(int a) { return a + 5; }
+func int k_param_0(int a) { return a - 1; }
+
+kernel k(int* o) {
+    shared int buf[4];
+    shared int b_uf[4];
+    int t = thread_idx;
+    if (t == 0) {
+        buf[0] = k_buf(1);
+        b_uf[0] = 2;
+    }
+    barrier();
+    if (t == 0) {
+        o[0] = entry(1);     // 2
+        o[1] = L_then_0(3);  // 6
+        o[2] = f(1);         // 11
+        o[3] = retval0(1);   // 1101
+        o[4] = buf[0];       // 6
+        o[5] = k_param_0(1); // 0
+        o[6] = b_uf[0];      // 2
+    }
+}
+
+kernel k_b(int* o) {
+    shared int uf[4];
+    uf[thread_idx % 4] = 7;
+    barrier();
+    if (thread_idx == 0) {
+        o[7] = uf[0];        // 7
+    }
+}

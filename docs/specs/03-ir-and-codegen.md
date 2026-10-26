@@ -47,17 +47,17 @@ The IR is a non-SSA 3-address virtual-register code organized into Basic Blocks 
 
 7. **Device Functions and Calling Convention**:
    - Forward Prototypes: Every `.func` has a forward prototype emitted at module scope
-     before any function definitions (`.func (.param .<t> f_retval) f(.param .<t> f_param_0, ...);`).
+     before any function definitions (`.func (.param .<t> f$retval) f(.param .<t> f$param_0, ...);`).
      This allows calls to functions defined later in the file without requiring forward declarations.
    - Call Sites: Scoped brace blocks declare `.param` registers, store arguments with `st.param`,
      execute a non-uniform `call` (allowing divergent branches), and load the return value with `ld.param`:
      ```ptx
      {
-         .param .f32 param0;
-         st.param.f32 [param0], %f1;
-         .param .f32 retval0;
-         call (retval0), use, (param0);
-         ld.param.f32 %f0, [retval0];
+         .param .f32 $arg0;
+         st.param.f32 [$arg0], %f1;
+         .param .f32 $ret;
+         call ($ret), use, ($arg0);
+         ld.param.f32 %f0, [$ret];
      }
      ```
    - ABI Types & Parameter Loading:
@@ -65,9 +65,25 @@ The IR is a non-SSA 3-address virtual-register code organized into Basic Blocks 
        64-bit global addresses (no `cvta.to.global`).
      - `bool` crosses the ABI as a 32-bit integer (`.b32` 0/1); converted via `selp` before passing/returning
        and `setp.ne` against 0 after receiving.
-     - Return statements in non-void device functions emit `IROp::StoreRetval` (`st.param.<t> [f_retval], %r`)
+     - Return statements in non-void device functions emit `IROp::StoreRetval` (`st.param.<t> [f$retval], %r`)
        followed by `IROp::Ret`.
    - Optimization Integration:
      - Dead Code Elimination (DCE) treats `IROp::Call` and `IROp::StoreRetval` as side-effecting operations.
      - Register use counting in DCE includes registers in `IRInst::args`.
      - Register pre-allocation in `PTXEmitter` covers all registers in `inst.args`.
+
+8. **Generated PTX Names**:
+   - Every name kernc invents contains `$`, which PTX identifiers allow and `.kern` identifiers
+     do not, so it can never collide with a kernel, function or array name from the source.
+     The helpers live in `ptxname::` (`include/kernc/IR.h`):
+
+     | Generated name | Form |
+     |---|---|
+     | Block labels | `$entry`, `$L_then_0`, `$L_for_cond_2`, ... |
+     | Parameters | `<fn>$param_<i>` |
+     | Return value | `<fn>$retval` |
+     | Shared arrays | `<kernel>$<array>` (a second same-named array in the kernel gets `$<n>`) |
+     | Call-site temporaries | `$arg<i>`, `$ret` |
+
+   - `tests/regress/name_collisions.kern` uses source names that match the old, underscore-based
+     scheme (`entry`, `L_then_0`, `f_retval`, `param0`, `k_buf`, ...); ptxas and a GPU test check it.

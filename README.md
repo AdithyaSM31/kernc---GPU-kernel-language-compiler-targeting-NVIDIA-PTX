@@ -29,7 +29,7 @@ What it supports:
 - `.file` / `.loc` source line info with `-lineinfo`
 - diagnostics with `file:line:column` and a caret
 
-The suite has 93 tests, and all of them pass, both in a normal build and under
+The suite has 96 tests, and all of them pass, both in a normal build and under
 UndefinedBehaviorSanitizer.
 
 ---
@@ -104,8 +104,8 @@ Rules that matter for correctness:
   across the ABI as 32-bit values) and can be recursive. Pointer parameters receive already-converted
   global addresses (no redundant `cvta`). Forward calls and mutual recursion are supported via
   module-level prototypes.
-- **`bool` cannot be a kernel parameter.** The `.param` space has no predicate type, so pass an
-  `int` instead to kernels.
+- **`bool` cannot be a kernel parameter.** A `.param` variable cannot have predicate type, so
+  pass an `int` to a kernel instead.
 
 ---
 
@@ -139,10 +139,10 @@ omitted):
 
 ```ptx
 .visible .entry saxpy(
-    .param .f32 saxpy_param_0,
-    .param .u64 saxpy_param_1,
-    .param .u64 saxpy_param_2,
-    .param .s32 saxpy_param_3
+    .param .f32 saxpy$param_0,
+    .param .u64 saxpy$param_1,
+    .param .u64 saxpy$param_2,
+    .param .s32 saxpy$param_3
 )
 {
     .reg .s32   %r<10>;
@@ -150,13 +150,13 @@ omitted):
     .reg .s64   %rd<10>;
     .reg .pred  %p<1>;
 
-entry:
-    ld.param.f32 %f0, [saxpy_param_0];
-    ld.param.u64 %rd0, [saxpy_param_1];
+$entry:
+    ld.param.f32 %f0, [saxpy$param_0];
+    ld.param.u64 %rd0, [saxpy$param_1];
     cvta.to.global.u64 %rd1, %rd0;
-    ld.param.u64 %rd2, [saxpy_param_2];
+    ld.param.u64 %rd2, [saxpy$param_2];
     cvta.to.global.u64 %rd3, %rd2;
-    ld.param.s32 %r0, [saxpy_param_3];
+    ld.param.s32 %r0, [saxpy$param_3];
     mov.u32 %r1, %ctaid.x;
     mov.u32 %r2, %ntid.x;
     mul.lo.s32 %r3, %r1, %r2;
@@ -164,9 +164,9 @@ entry:
     add.s32 %r5, %r3, %r4;
     mov.s32 %r6, %r5;
     setp.lt.s32 %p0, %r6, %r0;
-    @%p0 bra L_then_0;
-    bra L_if_end_1;
-L_then_0:
+    @%p0 bra $L_then_0;
+    bra $L_if_end_1;
+$L_then_0:
     mov.s32 %r7, 4;
     mul.wide.s32 %rd4, %r6, %r7;
     add.s64 %rd5, %rd3, %rd4;
@@ -181,8 +181,8 @@ L_then_0:
     ld.global.f32 %f3, [%rd9];
     add.f32 %f4, %f2, %f3;
     st.global.f32 [%rd5], %f4;
-    bra L_if_end_1;
-L_if_end_1:
+    bra $L_if_end_1;
+$L_if_end_1:
     ret;
 }
 ```
@@ -250,8 +250,8 @@ computes in `uint32_t`. Division by zero and `INT_MIN / -1` are left for the har
 
 **5. Address arithmetic depends on the state space.** Global pointers are 64-bit: the index is
 widened and scaled in one `mul.wide.s32`, then added with `add.s64`, after a one-time
-`cvta.to.global`. Shared arrays are module-scope `.shared` symbols named `<kernel>_<name>`,
-the way nvcc names them. Their addresses are 32-bit offsets into the block's shared window
+`cvta.to.global`. Shared arrays are module-scope `.shared` symbols named `<kernel>$<name>`
+(nvcc also puts them at module scope, under mangled names). Their addresses are 32-bit offsets into the block's shared window
 (`mov.u32` of the symbol, `mul.lo.s32`, `add.s32`), which saves registers.
 
 **6. Barriers and divergence.** `bar.sync 0` requires every thread in the block to arrive. The
@@ -289,17 +289,33 @@ the right lines.
 wider type, but kernc has no wider type, so it uses Java's rule from JLS §3.10.1. The check
 runs in Sema, not the lexer, because only Sema can see the surrounding unary minus.
 
+**9. Device functions use PTX's abstract calling convention.** A call stores its arguments
+into scoped `.param` variables and runs `call ($ret), f, ($arg0, ...)`; ptxas lowers this onto
+the real ABI (registers, plus a stack frame when needed). Every `.func` gets a prototype at
+the top of the module, because ptxas rejects a call to a later function without one ("requires
+call prototype"); this also makes mutual recursion work. A `.param` can't have predicate
+type, so `bool` crosses a call as a 32-bit 0/1. Pointer arguments are already global addresses,
+so the callee skips `cvta`; that's only valid because every kernc pointer points to global
+memory. Calls are side effects for DCE, and their arguments count as uses. Plain `call`
+(not `call.uni`) is emitted, because `call.uni` would promise the call is never divergent.
+
+**10. Generated names live where user names can't.** Every PTX name kernc invents contains
+`$` (`$entry`, `$L_then_0`, `f$param_0`, `f$retval`, `k$buf`, `$arg0`). PTX identifiers allow
+`$` but `.kern` identifiers don't, so a collision is impossible rather than merely unlikely.
+Before this, a function named `entry` or `f_retval`, or two kernels' shared arrays, could
+produce PTX that ptxas rejected. nvcc keeps its own labels apart the same way (`$L__BB0_2`).
+
 ---
 
 ## Testing
 
 | Suite | Count | What it checks |
 |---|---|---|
-| Unit tests (GoogleTest) | 57 | Lexer 7, parser 10, Sema 18 (accept and reject cases, checking `line:col`), IR and PTX 22 |
-| GPU end-to-end (Driver API) | 17 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
+| Unit tests (GoogleTest) | 57 | Lexer 7, parser 10, Sema 18 (accept and reject cases, many checking `line:col`), IR and PTX 22 |
+| GPU end-to-end (Driver API) | 18 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
 | Diagnostics | 1 suite, 8 files | `tests/diagnostic/err_*.kern` must fail with the expected message (and location, where given) |
 | ptxas acceptance | 6 | Every file in `examples/` assembles with `ptxas -arch=sm_86` |
-| ptxas regression | 10 | `tests/regress/*.kern` (5 kernels) assemble at both `-O0` and `-O1` |
+| ptxas regression | 12 | `tests/regress/*.kern` (6 kernels) assemble at both `-O0` and `-O1` |
 | Line tables | 2 | `kernc -lineinfo` → ptxas → `nvdisasm --print-line-info`; each `//@ REGEX` line must own matching SASS |
 
 The GPU tests cover:
@@ -311,6 +327,8 @@ The GPU tests cover:
 - a block reverse through shared memory;
 - the shipped reduction example, for 1 to 2²⁰+3 elements;
 - device functions (`examples/functions.kern`), with recursion, mutual recursion, float, bool, pointer and void calls at `-O0` and `-O1`;
+- functions and arrays named like kernc's old generated PTX names (`entry`, `L_then_0`,
+  `f_retval`, `param0`, `k_buf`, …), which must compile and call the right function;
 - PTX with line info under `CU_JIT_GENERATE_LINE_INFO`;
 - a differential test where `-O0` and `-O1` must give bit-identical results on edge-case
   constants.
@@ -341,6 +359,7 @@ these bugs:
 | Float `!=` lowered to `setp.ne.f32` | `x != x` was false for NaN |
 | Comparisons used as values | Lowered to `add.s32` (hidden until `bool` existed) |
 | Out-of-range literals | `3000000000` was silently truncated |
+| Generated PTX names shared the user namespace | A function named `entry`, `f_retval` or `k_buf` (or two kernels' arrays, `k`+`b_uf` vs `k_b`+`uf`) made ptxas reject a valid program |
 
 Every fix is in the commit history, together with a test that failed before the fix.
 
@@ -352,7 +371,11 @@ Every fix is in the commit history, together with a test that failed before the 
   against nvcc in the reduction (see above). `% 128` has the same problem.
 - **No CSE or copy propagation in kernc.** For SAXPY ptxas makes up for it, as shown above,
   but kernc's own PTX still recomputes addresses and reloads constants.
-- **No unreachable-block removal.** Code after `return` leaves an unreachable `L_after_ret`
+- **No inlining.** ptxas keeps every device-function call as a real `CALL` with the ABI's
+  overhead: in `examples/functions.kern` it inlined none of the 7 functions, not even
+  `square`. nvcc's front end inlines before emitting PTX, so this is front-end work, like
+  strength reduction.
+- **No unreachable-block removal.** Code after `return` leaves an unreachable `$L_after_ret`
   block in the PTX; ptxas removes it.
 - **No definite-assignment analysis.** Reading an uninitialized variable produces valid PTX
   but an undefined value, as in C, and kernc doesn't warn about it.

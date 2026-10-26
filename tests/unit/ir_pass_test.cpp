@@ -335,7 +335,7 @@ TEST(IRPassTest, SharedArrayLowersToSharedStateSpace) {
     std::string ptx = PTXEmitter().emitFunction(fn);
 
     // Declared at module scope, before the entry, with a per-kernel name (like nvcc).
-    size_t decl = ptx.find(".shared .align 4 .f32 t_buf[128];");
+    size_t decl = ptx.find(".shared .align 4 .f32 t$buf[128];");
     ASSERT_NE(decl, std::string::npos) << ptx;
     EXPECT_LT(decl, ptx.find(".visible .entry t")) << ptx;
     EXPECT_NE(ptx.find("bar.sync 0;"), std::string::npos) << ptx;
@@ -461,19 +461,19 @@ TEST(IRPassTest, DeviceFunctionPTXShape) {
     std::string ptx = PTXEmitter().emitModule(mod);
 
     // Every .func gets a prototype before any definition, so forward calls assemble.
-    size_t proto = ptx.find(".func (.param .f32 use_retval) use(.param .f32 use_param_0);");
+    size_t proto = ptx.find(".func (.param .f32 use$retval) use(.param .f32 use$param_0);");
     ASSERT_NE(proto, std::string::npos) << ptx;
     EXPECT_LT(proto, ptx.find(".visible .entry k")) << ptx;
-    EXPECT_NE(ptx.find(".func store(.param .b64 store_param_0, .param .f32 store_param_1);"),
+    EXPECT_NE(ptx.find(".func store(.param .b64 store$param_0, .param .f32 store$param_1);"),
               std::string::npos) << ptx;
 
     // Call sites use scoped .param blocks.
-    EXPECT_NE(ptx.find("call (retval0), use, (param0);"), std::string::npos) << ptx;
-    EXPECT_NE(ptx.find("call store, (param0, param1);"), std::string::npos) << ptx;
-    EXPECT_NE(ptx.find("st.param.f32 [use_retval], "), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("call ($ret), use, ($arg0);"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("call store, ($arg0, $arg1);"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("st.param.f32 [use$retval], "), std::string::npos) << ptx;
 
     // A device function receives an already-converted global address: no cvta in its body.
-    size_t body = ptx.find(".func store(.param .b64 store_param_0, .param .f32 store_param_1)\n{");
+    size_t body = ptx.find(".func store(.param .b64 store$param_0, .param .f32 store$param_1)\n{");
     ASSERT_NE(body, std::string::npos) << ptx;
     std::string storeBody = ptx.substr(body, ptx.find("\n}", body) - body);
     EXPECT_EQ(storeBody.find("cvta"), std::string::npos) << storeBody;

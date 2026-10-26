@@ -772,6 +772,41 @@ TEST_F(KernelE2ETest, DeviceFunctionsExampleMatchesCpu) {
     }
 }
 
+// User names that match kernc's old generated PTX names (labels, .param names, call-site
+// temporaries, shared-array symbols) must still compile, and each call must reach the
+// intended function. Values are listed in tests/regress/name_collisions.kern.
+TEST_F(KernelE2ETest, UserNamesCannotCollideWithGeneratedNames) {
+    std::string src = readFile(std::string(KERNC_REGRESS_DIR) + "/name_collisions.kern");
+    ASSERT_FALSE(src.empty()) << "could not read tests/regress/name_collisions.kern";
+    for (bool optimize : {false, true}) {
+        const char* opt = optimize ? "-O1" : "-O0";
+        std::string ptx = compileSourceToPTX(src, optimize);
+        ASSERT_FALSE(ptx.empty());
+        CUmodule mod = loadPTX(ptx);
+        ASSERT_NE(mod, nullptr) << opt;
+        CUfunction k, k_b;
+        CHECK_CUDA(cuModuleGetFunction(&k, mod, "k"));
+        CHECK_CUDA(cuModuleGetFunction(&k_b, mod, "k_b"));
+
+        std::vector<int> h_o(8, -1);
+        CUdeviceptr d_o;
+        CHECK_CUDA(cuMemAlloc(&d_o, h_o.size() * sizeof(int)));
+        CHECK_CUDA(cuMemcpyHtoD(d_o, h_o.data(), h_o.size() * sizeof(int)));
+        void* args[] = { &d_o };
+        CHECK_CUDA(cuLaunchKernel(k, 1, 1, 1, 32, 1, 1, 0, 0, args, 0));
+        CHECK_CUDA(cuLaunchKernel(k_b, 1, 1, 1, 32, 1, 1, 0, 0, args, 0));
+        CHECK_CUDA(cuCtxSynchronize());
+        CHECK_CUDA(cuMemcpyDtoH(h_o.data(), d_o, h_o.size() * sizeof(int)));
+
+        const int expected[8] = {2, 6, 11, 1101, 6, 0, 2, 7};
+        for (int j = 0; j < 8; ++j) {
+            EXPECT_EQ(h_o[j], expected[j]) << opt << " o[" << j << "]";
+        }
+        CHECK_CUDA(cuMemFree(d_o));
+        CHECK_CUDA(cuModuleUnload(mod));
+    }
+}
+
 // -------------------------------------------------------------
 // Line info
 // -------------------------------------------------------------
