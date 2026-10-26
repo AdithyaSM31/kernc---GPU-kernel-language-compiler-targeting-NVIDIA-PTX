@@ -2,7 +2,7 @@
 
 ## Test Levels
 
-`kernc` employs four comprehensive test suites:
+`kernc` employs six comprehensive test suites:
 
 ### 1. Unit Tests (GoogleTest)
 - `tests/unit/lexer_test.cpp`: Keywords, numeric formats (int/hex/float), source locations, comments.
@@ -50,3 +50,13 @@
 - Run at `-O0` and `-O1`. Unit tests cover the per-instruction locations, the `.file`/`.loc`
   text and file-name escaping; a GPU test JIT-loads line-info PTX with
   `CU_JIT_GENERATE_LINE_INFO` and checks the results.
+
+### 6. Standalone Runner CLI Tests (`kernc-runner`)
+- `tests/runner/test_runner.py` validates the standalone CUDA Driver API execution utility `kernc-runner` (`tools/runner/runner.cpp`):
+  - `--help` and usage formatting detailing `--arg`, `--grid`, `--block`, and `--dump`.
+  - Kernel execution on NVIDIA GeForce RTX 3060 Laptop GPU through CUDA Driver API (`cuLaunchKernel`, `cuCtxSynchronize`).
+  - Typed argument parsing for 32-bit scalars (`i32:<val>`, `f32:<val>`) and device memory buffers (`buf:<type>:<N>:<init>` with `zeros`, `rand`, `seq`).
+  - Output inspection via `--dump <arg_index>[:<count>]` verifying element-by-element correctness against mathematical expectations.
+  - Driver JIT compilation logging (`CU_JIT_INFO_LOG_BUFFER`, `CU_JIT_ERROR_LOG_BUFFER`) under `--verbose`.
+  - Negative test suite verifying robust error handling and resource cleanup on missing files, unknown kernel symbols, argument count mismatches, and invalid dump specifications.
+

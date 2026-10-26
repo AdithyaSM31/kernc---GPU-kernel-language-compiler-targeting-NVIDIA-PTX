@@ -76,3 +76,17 @@ if (PTXAS_BIN AND NVDISASM_BIN)
 else()
     message(WARNING "nvdisasm not found. Line-table tests will be disabled.")
 endif()
+
+# 6. Standalone Runner Tool Tests
+if (TARGET kernc-runner AND CUDA_FOUND)
+    set(RUNNER_TEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/runner_test")
+    file(MAKE_DIRECTORY "${RUNNER_TEST_DIR}")
+    add_test(NAME runner_e2e_test
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/runner/test_runner.py
+                $<TARGET_FILE:kernc>
+                $<TARGET_FILE:kernc-runner>
+                ${CMAKE_SOURCE_DIR}/examples
+                ${RUNNER_TEST_DIR}
+    )
+endif()
+

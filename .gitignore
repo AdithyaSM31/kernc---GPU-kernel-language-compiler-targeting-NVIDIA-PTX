@@ -3,3 +3,4 @@ build/
 *.cubin
 .vscode/
 .cache/
+.agents/

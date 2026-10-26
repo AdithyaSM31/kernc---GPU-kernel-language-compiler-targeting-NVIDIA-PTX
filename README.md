@@ -29,7 +29,7 @@ What it supports:
 - `.file` / `.loc` source line info with `-lineinfo`
 - diagnostics with `file:line:column` and a caret
 
-The suite has 96 tests, and all of them pass, both in a normal build and under
+The suite has 97 tests, and all of them pass, both in a normal build and under
 UndefinedBehaviorSanitizer.
 
 ---
@@ -61,6 +61,29 @@ Compile a kernel:
 | `-O0` / `-O1` | Disable / enable optimization (default `-O1`) |
 | `-lineinfo`, `--generate-line-info` | Emit `.file` / `.loc` source line info |
 | `--dump-tokens`, `--dump-ir`, `--dump-opt-ir` | Print tokens, IR before / after optimization |
+
+Execute a kernel on the GPU (`kernc-runner`):
+
+```bash
+./build/kernc-runner vecadd.ptx vecadd \
+    --grid 4 --block 256 \
+    --arg buf:i32:1024:seq \
+    --arg buf:i32:1024:seq \
+    --arg buf:i32:1024:zeros \
+    --arg i32:1024 \
+    --dump 2:8
+```
+
+| Runner Option | Meaning |
+|---|---|
+| `-p`, `--ptx <path>` | Path to PTX file (or positional argument) |
+| `-k`, `--kernel <name>` | Kernel function name (or positional argument) |
+| `-g`, `--grid <n>` | Grid dimension / block count (default: `1`) |
+| `-b`, `--block <n>` | Block dimension / threads per block (default: `256`) |
+| `--arg <spec>` | Kernel argument in call order: `i32:<val>`, `f32:<val>`, or `buf:<i32\|f32>:<N>:<init>` (`zeros`, `seq`, `rand`) |
+| `--dump <idx>[:<cnt>]` | Copy back and display first `<cnt>` elements (default `min(N, 16)`) of buffer `<idx>` |
+| `-v`, `--verbose` | Display Driver JIT compilation logs |
+| `-h`, `--help` | Show command-line usage |
 
 To build with UndefinedBehaviorSanitizer, which turns undefined behaviour inside the compiler
 into a hard failure:
@@ -385,8 +408,10 @@ Every fix is in the commit history, together with a test that failed before the 
   `bool` kernel parameters.
 - **Line info is per statement**, not per expression. Also, `-(2147483648)` is accepted
   because parentheses aren't kept in the AST; Java rejects it.
-- **`tools/runner` (`kernc-runner`) is only a load check.** It JIT-loads a PTX file and looks up
-  the kernel, but doesn't launch it. The GPU tests in `tests/e2e/` are the real harness.
+- **`tools/runner` (`kernc-runner`) is a full CUDA Driver API CLI execution utility.** It launches
+  compiled PTX kernels with typed arguments (`--arg`), configurable grid/block geometry (`-g`, `-b`),
+  device buffer initialization (`zeros`, `seq`, `rand`), Driver JIT logging (`-v`), and output buffer
+  inspection (`--dump`).
 - **compute-sanitizer can't run under WSL here** until the Windows debugger interface is
   enabled (run `EnableDebuggerInterface.bat` as administrator). With it, memcheck could report
   faults against `.kern` lines using `-lineinfo`.
@@ -404,6 +429,7 @@ tests/e2e/           GPU tests through the CUDA Driver API
 tests/diagnostic/    err_*.kern files and the runner that checks their messages
 tests/regress/       kernels assembled by ptxas at -O0 and -O1
 tests/lineinfo/      line-table kernels and check_lineinfo.py (ptxas + nvdisasm)
-tools/runner/        kernc-runner (PTX load check)
+tools/runner/        kernc-runner (CLI kernel execution via CUDA Driver API)
 docs/specs/          scope, architecture, IR and codegen, testing strategy
 ```
+
