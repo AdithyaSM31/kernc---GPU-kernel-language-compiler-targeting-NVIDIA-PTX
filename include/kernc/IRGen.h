@@ -13,7 +13,7 @@ public:
     explicit IRGen(DiagnosticsEngine& diag);
 
     IRModule emitModule(const Program& program);
-    IRFunction emitKernel(const KernelDecl& kernel);
+    IRFunction emitFunction(const FunctionDecl& kernel);
 
 private:
     void emitStmt(const Stmt& stmt, IRFunction& fn);
@@ -31,6 +31,7 @@ private:
     VReg emitIndexExpr(const IndexExpr& expr, IRFunction& fn);
     VReg emitCastExpr(const CastExpr& expr, IRFunction& fn);
     VReg emitBuiltin(const BuiltinExpr& expr, IRFunction& fn);
+    VReg emitCallExpr(const CallExpr& expr, IRFunction& fn);
 
     void emitCondition(const Expr& cond, const Label& trueLabel, const Label& falseLabel, IRFunction& fn);
     void emitBranch(VReg pred, const Label& trueLabel, const Label& falseLabel, IRFunction& fn);
@@ -74,6 +75,13 @@ private:
         }
         return nullptr;
     }
+
+    struct FuncInfo {
+        bool isKernel = true;
+        Type returnType = Type::makeVoid();
+        std::vector<Type> paramTypes;
+    };
+    std::unordered_map<std::string, FuncInfo> funcSignatures_;
 
     DiagnosticsEngine& diag_;
     std::vector<std::unordered_map<std::string, VarInfo>> varScopes_;

@@ -13,7 +13,8 @@ public:
     Parser(Lexer& lexer, DiagnosticsEngine& diag);
 
     std::unique_ptr<Program> parseProgram();
-    std::unique_ptr<KernelDecl> parseKernel();
+    std::unique_ptr<FunctionDecl> parseKernel();
+    std::unique_ptr<FunctionDecl> parseFunction();
 
 private:
     Token current() const { return current_; }

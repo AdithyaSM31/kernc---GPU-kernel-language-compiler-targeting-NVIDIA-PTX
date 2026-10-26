@@ -4,32 +4,93 @@ namespace kernc {
 
 Sema::Sema(DiagnosticsEngine& diag) : diag_(diag) {}
 
+static bool returnsOnAllPaths(const Stmt& stmt) {
+    if (dynamic_cast<const ReturnStmt*>(&stmt)) {
+        return true;
+    }
+    if (auto* block = dynamic_cast<const BlockStmt*>(&stmt)) {
+        for (const auto& s : block->stmts) {
+            if (returnsOnAllPaths(*s)) return true;
+        }
+        return false;
+    }
+    if (auto* ifStmt = dynamic_cast<const IfStmt*>(&stmt)) {
+        if (!ifStmt->elseBranch) return false;
+        return returnsOnAllPaths(*ifStmt->thenBranch) && returnsOnAllPaths(*ifStmt->elseBranch);
+    }
+    return false;
+}
+
 bool Sema::checkProgram(Program& program) {
+    functions_.clear();
     bool ok = true;
-    for (auto& kernel : program.kernels) {
-        if (!checkKernel(*kernel)) {
+    for (auto& func : program.functions) {
+        auto it = functions_.find(func->name);
+        if (it != functions_.end()) {
+            diag_.error(func->range.begin, "redefinition of function '" + func->name + "'");
+            ok = false;
+        } else {
+            std::vector<Type> paramTypes;
+            for (const auto& p : func->params) {
+                paramTypes.push_back(p.type);
+            }
+            functions_[func->name] = FunctionSignature{
+                func->name,
+                func->isKernel,
+                func->returnType,
+                std::move(paramTypes),
+                func->range.begin
+            };
+        }
+    }
+
+    for (auto& func : program.functions) {
+        if (!checkFunction(*func)) {
             ok = false;
         }
     }
     return ok && !diag_.hasErrors();
 }
 
-bool Sema::checkKernel(KernelDecl& kernel) {
+bool Sema::checkFunction(FunctionDecl& kernel) {
+    currentFunction_ = &kernel;
     currentKernel_ = kernel.name;
     symTable_.enterScope();
 
+    if (functions_.find(kernel.name) == functions_.end()) {
+        std::vector<Type> paramTypes;
+        for (const auto& p : kernel.params) paramTypes.push_back(p.type);
+        functions_[kernel.name] = FunctionSignature{
+            kernel.name,
+            kernel.isKernel,
+            kernel.returnType,
+            std::move(paramTypes),
+            kernel.range.begin
+        };
+    }
+
+    if (!kernel.isKernel) {
+        if (kernel.returnType.isPtr()) {
+            diag_.error(kernel.range.begin, "device functions cannot return pointers");
+        }
+    }
+
     for (const auto& param : kernel.params) {
-        if (param.name == "thread_idx" || param.name == "block_idx" || param.name == "block_dim") {
-            diag_.error(param.loc, "kernel parameter cannot have reserved builtin name '" + param.name + "'");
+        if (param.type.isVoid()) {
+            diag_.error(param.loc, (kernel.isKernel ? "kernel parameter '" : "parameter '") + param.name + "' cannot have type 'void'");
             continue;
         }
-        if (param.type.isBool()) {
+        if (param.name == "thread_idx" || param.name == "block_idx" || param.name == "block_dim") {
+            diag_.error(param.loc, (kernel.isKernel ? "kernel parameter cannot have reserved builtin name '" : "parameter cannot have reserved builtin name '") + param.name + "'");
+            continue;
+        }
+        if (kernel.isKernel && param.type.isBool()) {
             // bool lives in .pred registers, and the .param space has no predicate type.
             diag_.error(param.loc, "kernel parameter '" + param.name +
                         "' cannot have type 'bool' (pass an int instead)");
         }
         if (!symTable_.declare(param.name, param.type)) {
-            diag_.error(param.loc, "duplicate kernel parameter name '" + param.name + "'");
+            diag_.error(param.loc, (kernel.isKernel ? "duplicate kernel parameter name '" : "duplicate parameter name '") + param.name + "'");
         }
     }
 
@@ -37,18 +98,37 @@ bool Sema::checkKernel(KernelDecl& kernel) {
     for (auto& stmt : kernel.body) {
         checkStmt(*stmt);
     }
+
+    if (!kernel.isKernel && !kernel.returnType.isVoid()) {
+        bool returns = false;
+        for (const auto& s : kernel.body) {
+            if (returnsOnAllPaths(*s)) {
+                returns = true;
+                break;
+            }
+        }
+        if (!returns) {
+            diag_.error(kernel.range.end, "control reaches end of non-void function '" + kernel.name + "'");
+        }
+    }
+
     // ptxas would reject this too ("uses too much shared data"), but without a source location.
-    if (sharedBytes_ > kStaticSharedLimit) {
+    if (kernel.isKernel && sharedBytes_ > kStaticSharedLimit) {
         diag_.error(kernel.range.begin, "kernel '" + kernel.name + "' uses " +
                     std::to_string(sharedBytes_) + " bytes of shared memory (static limit is " +
                     std::to_string(kStaticSharedLimit) + ")");
     }
 
     symTable_.exitScope();
+    currentFunction_ = nullptr;
     return !diag_.hasErrors();
 }
 
 void Sema::checkSharedDecl(SharedDeclStmt& stmt) {
+    if (currentFunction_ && !currentFunction_->isKernel) {
+        diag_.error(stmt.range.begin, "shared arrays can only be declared in kernels");
+        return;
+    }
     bool ok = true;
     if (!stmt.elemType.isInt() && !stmt.elemType.isFloat()) {
         diag_.error(stmt.range.begin, "shared arrays must have element type 'int' or 'float' (got '" +
@@ -87,16 +167,49 @@ void Sema::checkStmt(Stmt& stmt) {
     } else if (auto* block = dynamic_cast<BlockStmt*>(&stmt)) {
         checkBlock(*block);
     } else if (auto* exprStmt = dynamic_cast<ExprStmt*>(&stmt)) {
-        checkExpr(*exprStmt->expr);
+        if (auto* call = dynamic_cast<CallExpr*>(exprStmt->expr.get())) {
+            checkCallExpr(*call, /*isExprStmt=*/true);
+        } else {
+            checkExpr(*exprStmt->expr);
+        }
     } else if (dynamic_cast<BarrierStmt*>(&stmt)) {
         // barrier() takes no args, returns void
     } else if (auto* shared = dynamic_cast<SharedDeclStmt*>(&stmt)) {
         checkSharedDecl(*shared);
     } else if (auto* ret = dynamic_cast<ReturnStmt*>(&stmt)) {
-        if (ret->value) {
-            checkExpr(*ret->value);
-            diag_.error(ret->value->range.begin,
-                        "kernel '" + currentKernel_ + "' cannot return a value (kernels return void)");
+        if (!currentFunction_ || currentFunction_->isKernel) {
+            if (ret->value) {
+                checkExpr(*ret->value);
+                diag_.error(ret->value->range.begin,
+                            "kernel '" + currentKernel_ + "' cannot return a value (kernels return void)");
+            }
+        } else {
+            if (currentFunction_->returnType.isVoid()) {
+                if (ret->value) {
+                    checkExpr(*ret->value);
+                    diag_.error(ret->value->range.begin,
+                                "void function '" + currentFunction_->name + "' cannot return a value");
+                }
+            } else {
+                if (!ret->value) {
+                    diag_.error(ret->range.begin,
+                                "non-void function '" + currentFunction_->name + "' must return a value");
+                } else {
+                    Type valType = checkExpr(*ret->value);
+                    if (!valType.isVoid()) {
+                        if (currentFunction_->returnType == valType) {
+                            // match
+                        } else if (currentFunction_->returnType.isFloat() && valType.isInt()) {
+                            // implicit int -> float promotion allowed
+                        } else {
+                            diag_.error(ret->value->range.begin,
+                                        "cannot return '" + valType.toString() + "' from function '" +
+                                        currentFunction_->name + "' returning '" +
+                                        currentFunction_->returnType.toString() + "'");
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -248,7 +361,59 @@ Type Sema::checkExpr(Expr& expr) {
     if (auto* cast = dynamic_cast<CastExpr*>(&expr)) {
         return checkCastExpr(*cast);
     }
+    if (auto* call = dynamic_cast<CallExpr*>(&expr)) {
+        return checkCallExpr(*call, /*isExprStmt=*/false);
+    }
     return Type::makeVoid();
+}
+
+Type Sema::checkCallExpr(CallExpr& expr, bool isExprStmt) {
+    auto it = functions_.find(expr.callee);
+    if (it == functions_.end()) {
+        diag_.error(expr.range.begin, "call to undeclared function '" + expr.callee + "'");
+        expr.resolvedType = Type::makeVoid();
+        return expr.resolvedType;
+    }
+
+    const auto& sig = it->second;
+    if (sig.isKernel) {
+        diag_.error(expr.range.begin, "cannot call kernel '" + expr.callee + "' (kernels are launched from the host)");
+        expr.resolvedType = Type::makeVoid();
+        return expr.resolvedType;
+    }
+
+    if (sig.returnType.isVoid() && !isExprStmt) {
+        diag_.error(expr.range.begin, "void function '" + expr.callee + "' used as a value");
+        expr.resolvedType = Type::makeVoid();
+        return expr.resolvedType;
+    }
+
+    if (expr.args.size() != sig.paramTypes.size()) {
+        diag_.error(expr.range.begin, "function '" + expr.callee + "' expects " +
+                    std::to_string(sig.paramTypes.size()) + " argument(s), got " +
+                    std::to_string(expr.args.size()));
+        expr.resolvedType = sig.returnType;
+        return expr.resolvedType;
+    }
+
+    for (size_t i = 0; i < expr.args.size(); ++i) {
+        Type argType = checkExpr(*expr.args[i]);
+        Type paramType = sig.paramTypes[i];
+        if (argType.isVoid()) continue;
+
+        if (argType == paramType) {
+            // OK
+        } else if (paramType.isFloat() && argType.isInt()) {
+            // int -> float promotion allowed
+        } else {
+            diag_.error(expr.args[i]->range.begin, "argument " + std::to_string(i + 1) + " of '" +
+                        expr.callee + "': cannot pass '" + argType.toString() + "' as '" +
+                        paramType.toString() + "'");
+        }
+    }
+
+    expr.resolvedType = sig.returnType;
+    return expr.resolvedType;
 }
 
 Type Sema::checkIdentExpr(IdentExpr& expr, bool allowSharedArray) {

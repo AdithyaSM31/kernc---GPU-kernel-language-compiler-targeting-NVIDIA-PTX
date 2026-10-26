@@ -211,6 +211,67 @@ TEST(SemaTest, SharedArrayErrors) {
     }
 }
 
+TEST(SemaTest, DeviceFunctionsAccepted) {
+    std::string src =
+        "func float square(float x) { return x * x; }\n"
+        "func bool in_range(int i, int n) { return i >= 0 && i < n; }\n"
+        "func void store(float* out, int i, float v) { out[i] = v; }\n"
+        "func int fib(int k) { if (k < 2) { return k; } return fib(k - 1) + fib(k - 2); }\n"
+        // is_even calls is_odd before it is defined: signatures are collected first.
+        "func bool is_even(int k) { if (k == 0) { return true; } return is_odd(k - 1); }\n"
+        "func bool is_odd(int k) { if (k == 0) { return false; } return is_even(k - 1); }\n"
+        "func int sign(int v) { if (v < 0) { return -1; } else { return 1; } }\n"
+        "func float lane() { return cast<float>(thread_idx); }\n"
+        "kernel k(float* x, int n) {\n"
+        "    if (!in_range(thread_idx, n)) return;\n"
+        "    store(x, thread_idx, square(3));\n" // int argument promoted to float
+        "    float f = cast<float>(fib(5)) + cast<float>(sign(-2)) + lane();\n"
+        "    if (is_even(4)) { x[0] = f; }\n"
+        "}\n";
+    DiagnosticsEngine diag;
+    EXPECT_TRUE(checkSource(src, diag)) << diag.formatAll();
+}
+
+TEST(SemaTest, DeviceFunctionErrors) {
+    const std::pair<const char*, const char*> cases[] = {
+        {"kernel k() { foo(1); }", "call to undeclared function 'foo'"},
+        {"func int f(int a) { return a; }\nkernel k() { int x = f(1, 2); }",
+         "function 'f' expects 1 argument(s), got 2"},
+        {"func int f(int a) { return a; }\nkernel k() { int x = f(1.5); }",
+         "argument 1 of 'f': cannot pass 'float' as 'int'"},
+        {"kernel a() { }\nkernel k() { a(); }",
+         "cannot call kernel 'a' (kernels are launched from the host)"},
+        {"func void f() { }\nkernel k() { int x = f(); }", "void function 'f' used as a value"},
+        {"func int f(int a) {\n    if (a > 0) { return 1; }\n}\nkernel k() { }",
+         "3:1: error: control reaches end of non-void function 'f'"},
+        {"func int f() { return 1.5; }\nkernel k() { }",
+         "cannot return 'float' from function 'f' returning 'int'"},
+        {"func int f() { return; }\nkernel k() { }", "non-void function 'f' must return a value"},
+        {"func void f() { return 1; }\nkernel k() { }", "void function 'f' cannot return a value"},
+        {"func int f() { return 1; }\nfunc int f() { return 2; }\nkernel k() { }",
+         "2:1: error: redefinition of function 'f'"},
+        {"func int k() { return 1; }\nkernel k() { }", "redefinition of function 'k'"},
+        {"func void f() { shared float t[4]; }\nkernel k() { }",
+         "shared arrays can only be declared in kernels"},
+        {"func float* f(float* p) { return p; }\nkernel k() { }",
+         "device functions cannot return pointers"},
+        {"func void f(void x) { }\nkernel k() { }",
+         "parameter 'x' cannot have type 'void'"},
+        {"kernel k(void x) { }",
+         "kernel parameter 'x' cannot have type 'void'"},
+        {"func void f(int a, int a) { }\nkernel k() { }",
+         "duplicate parameter name 'a'"},
+        {"func void f(int thread_idx) { }\nkernel k() { }",
+         "parameter cannot have reserved builtin name 'thread_idx'"},
+    };
+    for (const auto& [src, expected] : cases) {
+        DiagnosticsEngine diag;
+        EXPECT_FALSE(checkSource(src, diag)) << src;
+        EXPECT_NE(diag.formatAll().find(expected), std::string::npos)
+            << src << "\n" << diag.formatAll();
+    }
+}
+
 TEST(SemaTest, NonIntSubscript) {
     std::string src = "kernel test(float* p) {\n"
                       "    float y = p[1.5];\n"

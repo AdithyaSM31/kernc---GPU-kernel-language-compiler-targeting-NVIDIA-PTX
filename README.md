@@ -20,7 +20,8 @@ kernel saxpy(float a, float* x, float* y, int n) {
 
 What it supports:
 
-- `int`, `float` and `bool`; `int*` / `float*` kernel parameters; `shared` arrays
+- `int`, `float` and `bool`; `int*` / `float*` parameters; `shared` arrays
+- device functions (`func`), including recursion and mutual recursion
 - `if` / `else`, `while`, `for`, `return`, `barrier()`
 - short-circuit `&&` / `||`, in conditions and as values
 - explicit `cast<T>()` between `int`, `float` and `bool`
@@ -28,7 +29,7 @@ What it supports:
 - `.file` / `.loc` source line info with `-lineinfo`
 - diagnostics with `file:line:column` and a caret
 
-The suite has 82 tests, and all of them pass, both in a normal build and under
+The suite has 93 tests, and all of them pass, both in a normal build and under
 UndefinedBehaviorSanitizer.
 
 ---
@@ -78,9 +79,9 @@ The full reference is in [docs/specs/01-scope.md](docs/specs/01-scope.md).
 
 | | |
 |---|---|
-| Types | `int` (`.s32`), `float` (`.f32`), `bool` (`.pred`); `int*` / `float*` as kernel parameters only |
+| Types | `int` (`.s32`), `float` (`.f32`), `bool` (`.pred`); `int*` / `float*` as parameters |
 | Built-ins | `thread_idx` → `%tid.x`, `block_idx` → `%ctaid.x`, `block_dim` → `%ntid.x` (x dimension only) |
-| Statements | declarations, assignment, `if`/`else`, `while`, `for`, `return;`, `barrier();`, `shared T name[N];` |
+| Statements | declarations, assignment, `if`/`else`, `while`, `for`, `return`, `barrier();`, `shared T name[N];`, function calls |
 | Operators | `+ - * / %`, unary `- !`, `< <= > >= == !=`, `&&` `\|\|` (short-circuit), `p[i]` |
 | Casts | `cast<int>(x)`, `cast<float>(x)`, `cast<bool>(x)` |
 
@@ -94,11 +95,17 @@ Rules that matter for correctness:
   to `2147483647`, except that `-2147483648` is allowed; hex up to `0xFFFFFFFF`, read as a bit
   pattern.
 - **`return;` ends the calling thread only.** Kernels return void, so `return x;` is an error.
+  Device functions returning non-void must return a value on all control paths.
 - **Shared memory.** `shared` arrays have `int`/`float` elements and a literal size, with at
   most 48 KB per kernel (the sm_86 static limit). Every thread in a block must reach every
-  `barrier()`.
+  `barrier()`. Shared arrays can only be declared in kernels.
+- **Device functions (`func`).** Declared with `func <type> name(params) { ... }`. May return `void`,
+  `int`, `float` or `bool`. Unlike kernels, device functions can accept `bool` parameters (marshaled
+  across the ABI as 32-bit values) and can be recursive. Pointer parameters receive already-converted
+  global addresses (no redundant `cvta`). Forward calls and mutual recursion are supported via
+  module-level prototypes.
 - **`bool` cannot be a kernel parameter.** The `.param` space has no predicate type, so pass an
-  `int` instead.
+  `int` instead to kernels.
 
 ---
 
@@ -288,11 +295,11 @@ runs in Sema, not the lexer, because only Sema can see the surrounding unary min
 
 | Suite | Count | What it checks |
 |---|---|---|
-| Unit tests (GoogleTest) | 50 | Lexer 6, parser 9, Sema 16 (accept and reject cases, many checking `line:col`), IR and PTX 19 |
-| GPU end-to-end (Driver API) | 16 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
+| Unit tests (GoogleTest) | 57 | Lexer 7, parser 10, Sema 18 (accept and reject cases, checking `line:col`), IR and PTX 22 |
+| GPU end-to-end (Driver API) | 17 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
 | Diagnostics | 1 suite, 8 files | `tests/diagnostic/err_*.kern` must fail with the expected message (and location, where given) |
-| ptxas acceptance | 5 | Every file in `examples/` assembles with `ptxas -arch=sm_86` |
-| ptxas regression | 8 | `tests/regress/*.kern` (4 kernels) assemble at both `-O0` and `-O1` |
+| ptxas acceptance | 6 | Every file in `examples/` assembles with `ptxas -arch=sm_86` |
+| ptxas regression | 10 | `tests/regress/*.kern` (5 kernels) assemble at both `-O0` and `-O1` |
 | Line tables | 2 | `kernc -lineinfo` → ptxas → `nvdisasm --print-line-info`; each `//@ REGEX` line must own matching SASS |
 
 The GPU tests cover:
@@ -303,6 +310,7 @@ The GPU tests cover:
 - 13 kinds of `bool` expression, with NaN and `-0.0` inputs;
 - a block reverse through shared memory;
 - the shipped reduction example, for 1 to 2²⁰+3 elements;
+- device functions (`examples/functions.kern`), with recursion, mutual recursion, float, bool, pointer and void calls at `-O0` and `-O1`;
 - PTX with line info under `CU_JIT_GENERATE_LINE_INFO`;
 - a differential test where `-O0` and `-O1` must give bit-identical results on edge-case
   constants.
@@ -350,8 +358,8 @@ Every fix is in the commit history, together with a test that failed before the 
   but an undefined value, as in C, and kernc doesn't warn about it.
 - **No barrier-divergence warning.** A `barrier()` behind a thread-dependent condition (or
   after an early `return` taken by some threads) isn't diagnosed.
-- **Not yet supported:** device functions (`.func`), y/z dimensions, structs, 64-bit types
-  other than pointers, and `bool` parameters.
+- **Not yet supported:** y/z dimensions, structs, 64-bit types other than pointers, and
+  `bool` kernel parameters.
 - **Line info is per statement**, not per expression. Also, `-(2147483648)` is accepted
   because parentheses aren't kept in the AST; Java rejects it.
 - **`tools/runner` (`kernc-runner`) is only a load check.** It JIT-loads a PTX file and looks up

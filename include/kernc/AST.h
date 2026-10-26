@@ -156,6 +156,14 @@ struct CastExpr : public Expr {
     }
 };
 
+// `f(a, b)`: a call to a device function (`func`), lowered to a PTX `call`.
+struct CallExpr : public Expr {
+    std::string callee;
+    std::vector<std::unique_ptr<Expr>> args;
+    CallExpr(std::string c, std::vector<std::unique_ptr<Expr>> a)
+        : callee(std::move(c)), args(std::move(a)) {}
+};
+
 // Statements
 struct Stmt : public ASTNode {};
 
@@ -232,14 +240,18 @@ struct Param {
     SourceLocation loc;
 };
 
-struct KernelDecl : public ASTNode {
+// A `kernel` (PTX .entry, launched from the host, returns void) or a `func` device function
+// (PTX .func, called from kernels and other functions, may return a value).
+struct FunctionDecl : public ASTNode {
+    bool isKernel = true;
+    Type returnType = Type::makeVoid();
     std::string name;
     std::vector<Param> params;
     std::vector<std::unique_ptr<Stmt>> body;
 };
 
 struct Program : public ASTNode {
-    std::vector<std::unique_ptr<KernelDecl>> kernels;
+    std::vector<std::unique_ptr<FunctionDecl>> functions;
 };
 
 } // namespace kernc

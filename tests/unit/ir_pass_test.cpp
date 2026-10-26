@@ -30,7 +30,28 @@ static IRFunction compileToIR(const std::string& src) {
     EXPECT_TRUE(ok) << diag.formatAll();
     if (!ok) return IRFunction{}; // IRGen assumes a well-typed AST
     IRGen irgen(diag);
-    return irgen.emitKernel(*program->kernels[0]);
+    return irgen.emitFunction(*program->functions[0]);
+}
+
+static IRModule compileModule(const std::string& src) {
+    DiagnosticsEngine diag;
+    Lexer lexer(src, &diag);
+    Parser parser(lexer, diag);
+    auto program = parser.parseProgram();
+    EXPECT_TRUE(program != nullptr) << diag.formatAll();
+    if (!program) return IRModule{};
+    Sema sema(diag);
+    bool ok = sema.checkProgram(*program);
+    EXPECT_TRUE(ok) << diag.formatAll();
+    if (!ok) return IRModule{};
+    IRGen irgen(diag);
+    return irgen.emitModule(*program);
+}
+
+static const IRFunction* findFunction(const IRModule& mod, const std::string& name) {
+    for (const auto& fn : mod.functions)
+        if (fn.name == name) return &fn;
+    return nullptr;
 }
 
 TEST(IRPassTest, ShortCircuitBranchThreading) {
@@ -403,6 +424,60 @@ TEST(IRPassTest, LineInfoEscapesFileName) {
     // A Windows path's backslashes (and any quote) must be escaped inside the PTX string.
     std::string ptx = emitWithLineInfo(kLineInfoSrc, "C:\\src\\a\"b.kern");
     EXPECT_NE(ptx.find(".file 1 \"C:\\\\src\\\\a\\\"b.kern\"\n"), std::string::npos) << ptx;
+}
+
+// -------------------------------------------------------------
+// Device functions
+// -------------------------------------------------------------
+TEST(IRPassTest, DCEKeepsCallsWhoseResultIsUnused) {
+    // touch() writes memory, so neither call may be deleted, even though one result is
+    // unused and the other is only stored in a dead variable.
+    auto mod = compileModule("func int touch(int* p) { p[0] = 7; return 1; }\n"
+                             "kernel k(int* p) {\n"
+                             "    touch(p);\n"
+                             "    int unused = touch(p);\n"
+                             "}\n");
+    Optimizer::runPasses(mod);
+    const IRFunction* k = findFunction(mod, "k");
+    ASSERT_NE(k, nullptr);
+    EXPECT_EQ(countOps(*k, IROp::Call), 2) << k->dump();
+}
+
+TEST(IRPassTest, CallArgumentsCountAsUses) {
+    // The add that computes the argument is only used by the call; DCE must keep it.
+    auto mod = compileModule("func int id(int v) { return v; }\n"
+                             "kernel k(int* o) { o[0] = id(thread_idx + 1); }\n");
+    Optimizer::runPasses(mod);
+    const IRFunction* k = findFunction(mod, "k");
+    ASSERT_NE(k, nullptr);
+    EXPECT_EQ(countOps(*k, IROp::Call), 1) << k->dump();
+    EXPECT_EQ(countOps(*k, IROp::Add), 1) << k->dump();
+}
+
+TEST(IRPassTest, DeviceFunctionPTXShape) {
+    auto mod = compileModule("func void store(float* p, float v) { p[0] = v; }\n"
+                             "kernel k(float* o) { store(o, use(2.0)); }\n"
+                             "func float use(float x) { return x; }\n");
+    std::string ptx = PTXEmitter().emitModule(mod);
+
+    // Every .func gets a prototype before any definition, so forward calls assemble.
+    size_t proto = ptx.find(".func (.param .f32 use_retval) use(.param .f32 use_param_0);");
+    ASSERT_NE(proto, std::string::npos) << ptx;
+    EXPECT_LT(proto, ptx.find(".visible .entry k")) << ptx;
+    EXPECT_NE(ptx.find(".func store(.param .b64 store_param_0, .param .f32 store_param_1);"),
+              std::string::npos) << ptx;
+
+    // Call sites use scoped .param blocks.
+    EXPECT_NE(ptx.find("call (retval0), use, (param0);"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("call store, (param0, param1);"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("st.param.f32 [use_retval], "), std::string::npos) << ptx;
+
+    // A device function receives an already-converted global address: no cvta in its body.
+    size_t body = ptx.find(".func store(.param .b64 store_param_0, .param .f32 store_param_1)\n{");
+    ASSERT_NE(body, std::string::npos) << ptx;
+    std::string storeBody = ptx.substr(body, ptx.find("\n}", body) - body);
+    EXPECT_EQ(storeBody.find("cvta"), std::string::npos) << storeBody;
+    EXPECT_NE(storeBody.find("st.global.f32"), std::string::npos) << storeBody;
 }
 
 TEST(IRPassTest, PTXEmissionValidStructure) {

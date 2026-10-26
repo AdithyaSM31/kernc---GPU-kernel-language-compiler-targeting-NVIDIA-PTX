@@ -21,6 +21,8 @@
   - `saxpy.kern`
   - `clamp.kern`
   - `relu.kern`
+  - `reduce.kern`
+  - `functions.kern`
 - Each kernel is compiled to PTX and assembled by `/usr/local/cuda-13.0/bin/ptxas -arch=sm_86`.
 - Ensures zero PTX syntax or semantic errors.
 
@@ -35,6 +37,8 @@
     - `saxpy`: Scaled vector addition with float constant.
     - `clamp`: Branching clamping within $[min, max]$.
     - `relu`: Branching ReLU $\max(0, x)$.
+    - `reduce`: Tree reduction using shared memory and barriers.
+    - `functions`: Device functions with recursion, mutual recursion, float/bool/pointer args and returns.
   - Verifies exact or epsilon-bound match against CPU reference implementation.
 
 ### 5. Line-Table Tests (`kernc -lineinfo` → ptxas → `nvdisasm --print-line-info`)

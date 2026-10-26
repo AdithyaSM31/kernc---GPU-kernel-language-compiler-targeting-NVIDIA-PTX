@@ -710,6 +710,69 @@ TEST_F(KernelE2ETest, ReductionExampleMatchesCpu) {
 }
 
 // -------------------------------------------------------------
+// Device functions
+// -------------------------------------------------------------
+static int fibRef(int k) { return k < 2 ? k : fibRef(k - 1) + fibRef(k - 2); }
+static int collatzRef(int v) {
+    int s = 0;
+    while (v != 1) { v = (v % 2 == 0) ? v / 2 : 3 * v + 1; ++s; }
+    return s;
+}
+
+// Runs examples/functions.kern: float, bool, pointer and void functions, recursion and mutual
+// recursion, checked against a CPU reference at -O0 and -O1.
+TEST_F(KernelE2ETest, DeviceFunctionsExampleMatchesCpu) {
+    std::string src = readFile(std::string(KERNC_EXAMPLES_DIR) + "/functions.kern");
+    ASSERT_FALSE(src.empty()) << "could not read examples/functions.kern";
+    const int n = 300, blockSize = 128, grid = 4; // 512 threads for 300 elements
+    std::vector<float> h_x(n);
+    for (int k = 0; k < n; ++k) h_x[k] = 0.1f * k - 7.0f;
+
+    for (bool optimize : {false, true}) {
+        const char* opt = optimize ? "-O1" : "-O0";
+        std::string ptx = compileSourceToPTX(src, optimize);
+        ASSERT_FALSE(ptx.empty());
+        CUmodule mod = loadPTX(ptx);
+        ASSERT_NE(mod, nullptr);
+        CUfunction func;
+        CHECK_CUDA(cuModuleGetFunction(&func, mod, "use_functions"));
+
+        std::vector<float> h_y(n + 64, -1.0f);
+        std::vector<int> h_z((n + 64) * 4, -1);
+        CUdeviceptr d_x, d_y, d_z;
+        CHECK_CUDA(cuMemAlloc(&d_x, n * sizeof(float)));
+        CHECK_CUDA(cuMemAlloc(&d_y, h_y.size() * sizeof(float)));
+        CHECK_CUDA(cuMemAlloc(&d_z, h_z.size() * sizeof(int)));
+        CHECK_CUDA(cuMemcpyHtoD(d_x, h_x.data(), n * sizeof(float)));
+        CHECK_CUDA(cuMemcpyHtoD(d_y, h_y.data(), h_y.size() * sizeof(float)));
+        CHECK_CUDA(cuMemcpyHtoD(d_z, h_z.data(), h_z.size() * sizeof(int)));
+        int nArg = n;
+        void* args[] = { &d_x, &d_y, &d_z, &nArg };
+        CHECK_CUDA(cuLaunchKernel(func, grid, 1, 1, blockSize, 1, 1, 0, 0, args, 0));
+        CHECK_CUDA(cuCtxSynchronize());
+        CHECK_CUDA(cuMemcpyDtoH(h_y.data(), d_y, h_y.size() * sizeof(float)));
+        CHECK_CUDA(cuMemcpyDtoH(h_z.data(), d_z, h_z.size() * sizeof(int)));
+
+        for (int i = 0; i < n; ++i) {
+            float want = 2.0f * h_x[i] * h_x[i];
+            ASSERT_NEAR(h_y[i], want, 1e-5f * std::max(1.0f, want)) << opt << " y[" << i << "]";
+            ASSERT_EQ(h_z[i * 4], fibRef(i % 15)) << opt << " fib, i=" << i;
+            ASSERT_EQ(h_z[i * 4 + 1], collatzRef(i + 1)) << opt << " collatz, i=" << i;
+            ASSERT_EQ(h_z[i * 4 + 2], (i % 20) % 2 == 0 ? 1 : 0) << opt << " is_even, i=" << i;
+            ASSERT_EQ(h_z[i * 4 + 3], (i - 5 >= 0 && i - 5 < 10) ? 1 : 0) << opt << " in_range, i=" << i;
+        }
+        // Threads past n returned early through in_range(), so nothing past n was written.
+        for (int i = n; i < n + 64; ++i) {
+            ASSERT_EQ(h_y[i], -1.0f) << opt << " y[" << i << "] written by an out-of-range thread";
+        }
+        CHECK_CUDA(cuMemFree(d_x));
+        CHECK_CUDA(cuMemFree(d_y));
+        CHECK_CUDA(cuMemFree(d_z));
+        CHECK_CUDA(cuModuleUnload(mod));
+    }
+}
+
+// -------------------------------------------------------------
 // Line info
 // -------------------------------------------------------------
 // PTX with .file/.loc must JIT with CU_JIT_GENERATE_LINE_INFO and still compute correctly.

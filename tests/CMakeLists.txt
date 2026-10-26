@@ -32,7 +32,7 @@ if (PTXAS_BIN)
     set(PTX_TEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/ptx_accept")
     file(MAKE_DIRECTORY "${PTX_TEST_DIR}")
 
-    set(KERNELS vecadd saxpy clamp relu reduce)
+    set(KERNELS vecadd saxpy clamp relu reduce functions)
     foreach(kern ${KERNELS})
         set(KERN_SRC "${CMAKE_SOURCE_DIR}/examples/${kern}.kern")
         set(OUT_PTX "${PTX_TEST_DIR}/${kern}.ptx")

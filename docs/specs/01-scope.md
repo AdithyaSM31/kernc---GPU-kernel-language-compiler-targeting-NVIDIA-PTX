@@ -8,7 +8,7 @@
 ### Data Types
 - `int`: 32-bit signed integer (`.s32` in PTX).
 - `float`: 32-bit IEEE-754 single-precision floating point (`.f32` in PTX).
-- Pointers: `int*` and `float*` (valid exclusively as kernel parameters).
+- Pointers: `int*` and `float*` (valid as kernel and device function parameters).
 - `bool`: `true` / `false`, held in `.pred` registers. Comparisons and `!`, `&&`, `||` produce
   `bool`. It does not convert implicitly to or from `int`/`float` (use `cast<>`), cannot be a
   kernel parameter (`.param` has no predicate type; pass an `int`), and has no pointer type.
@@ -54,3 +54,12 @@
 - Synchronization: `barrier();` -> `bar.sync 0;`. Every thread of the block must reach each
   barrier, so a barrier must not sit behind a condition that differs between threads (or
   after an early `return` taken by some of them). See `examples/reduce.kern`.
+
+### Functions
+- Kernels: `kernel name(params) { ... }` defines a top-level GPU entry point (`.visible .entry` in PTX). Kernels return void and cannot accept `bool` parameters.
+- Device Functions: `func <type> name(params) { ... }` defines a device function (`.func` in PTX) that can be called from kernels and other device functions.
+  - Return types: `void`, `int`, `float`, or `bool`. Device functions cannot return pointers.
+  - Non-void functions must return a value on all control paths; reaching the end of the body without a return is a compile error. Void functions cannot return a value.
+  - Parameters: `int`, `float`, `bool`, `int*`, `float*`. Unlike kernels, `bool` parameters are permitted (passed across the ABI as 32-bit values). Pointer parameters receive already-converted global addresses.
+  - Shared memory: `shared` arrays cannot be declared in device functions (they are block-scope and only allowed in kernels).
+  - Calling: Calls can appear as expressions or expression statements (for void or discarded returns). Forward calls and recursion / mutual recursion are supported; signatures are collected in an initial pass and prototypes are emitted ahead of definitions.

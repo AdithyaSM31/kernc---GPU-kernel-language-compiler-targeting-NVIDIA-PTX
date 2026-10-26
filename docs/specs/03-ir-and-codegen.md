@@ -44,3 +44,30 @@ The IR is a non-SSA 3-address virtual-register code organized into Basic Blocks 
      cuda-gdb, compute-sanitizer and Nsight use to map SASS back to `.kern` lines. Like nvcc's
      `-lineinfo` (and unlike `-G`), this does not disable optimization. Off by default; without
      it the PTX is unchanged.
+
+7. **Device Functions and Calling Convention**:
+   - Forward Prototypes: Every `.func` has a forward prototype emitted at module scope
+     before any function definitions (`.func (.param .<t> f_retval) f(.param .<t> f_param_0, ...);`).
+     This allows calls to functions defined later in the file without requiring forward declarations.
+   - Call Sites: Scoped brace blocks declare `.param` registers, store arguments with `st.param`,
+     execute a non-uniform `call` (allowing divergent branches), and load the return value with `ld.param`:
+     ```ptx
+     {
+         .param .f32 param0;
+         st.param.f32 [param0], %f1;
+         .param .f32 retval0;
+         call (retval0), use, (param0);
+         ld.param.f32 %f0, [retval0];
+     }
+     ```
+   - ABI Types & Parameter Loading:
+     - Pointer parameters to `.func` are loaded with `ld.param.b64` and receive already-converted
+       64-bit global addresses (no `cvta.to.global`).
+     - `bool` crosses the ABI as a 32-bit integer (`.b32` 0/1); converted via `selp` before passing/returning
+       and `setp.ne` against 0 after receiving.
+     - Return statements in non-void device functions emit `IROp::StoreRetval` (`st.param.<t> [f_retval], %r`)
+       followed by `IROp::Ret`.
+   - Optimization Integration:
+     - Dead Code Elimination (DCE) treats `IROp::Call` and `IROp::StoreRetval` as side-effecting operations.
+     - Register use counting in DCE includes registers in `IRInst::args`.
+     - Register pre-allocation in `PTXEmitter` covers all registers in `inst.args`.

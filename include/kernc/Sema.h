@@ -54,7 +54,7 @@ public:
     explicit Sema(DiagnosticsEngine& diag);
 
     bool checkProgram(Program& program);
-    bool checkKernel(KernelDecl& kernel);
+    bool checkFunction(FunctionDecl& kernel);
 
 private:
     void checkStmt(Stmt& stmt);
@@ -74,12 +74,24 @@ private:
     Type checkIdentExpr(IdentExpr& expr, bool allowSharedArray = false);
     Type checkIntLiteral(IntLiteralExpr& expr, bool negated);
 
+    Type checkCallExpr(CallExpr& expr, bool isExprStmt);
+
     bool isConditionType(const Type& t) const {
         return t.isBool() || t.isInt();
     }
 
+    struct FunctionSignature {
+        std::string name;
+        bool isKernel = true;
+        Type returnType = Type::makeVoid();
+        std::vector<Type> paramTypes;
+        SourceLocation loc;
+    };
+
     DiagnosticsEngine& diag_;
     SymbolTable symTable_;
+    std::unordered_map<std::string, FunctionSignature> functions_;
+    FunctionDecl* currentFunction_ = nullptr;
     std::string currentKernel_; // for diagnostics such as "kernel 'k' cannot return a value"
 
     // Static shared memory per block on sm_86 (ptxas reports the limit as 0xc000).

@@ -14,6 +14,8 @@ enum class TokenKind {
     // Identifiers & keywords
     Identifier,
     KW_kernel,
+    KW_func,
+    KW_void,
     KW_int,
     KW_float,
     KW_bool,

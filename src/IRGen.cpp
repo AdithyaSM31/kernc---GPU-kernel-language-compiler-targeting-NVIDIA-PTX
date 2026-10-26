@@ -18,15 +18,29 @@ static IRType toIRType(const Type& t) {
 IRGen::IRGen(DiagnosticsEngine& diag) : diag_(diag) {}
 
 IRModule IRGen::emitModule(const Program& program) {
+    funcSignatures_.clear();
+    for (const auto& func : program.functions) {
+        std::vector<Type> pt;
+        for (const auto& p : func->params) pt.push_back(p.type);
+        funcSignatures_[func->name] = FuncInfo{func->isKernel, func->returnType, std::move(pt)};
+    }
     IRModule mod;
-    for (const auto& kernel : program.kernels) {
-        mod.functions.push_back(emitKernel(*kernel));
+    for (const auto& kernel : program.functions) {
+        mod.functions.push_back(emitFunction(*kernel));
     }
     return mod;
 }
 
-IRFunction IRGen::emitKernel(const KernelDecl& kernel) {
+IRFunction IRGen::emitFunction(const FunctionDecl& kernel) {
+    if (funcSignatures_.find(kernel.name) == funcSignatures_.end()) {
+        std::vector<Type> pt;
+        for (const auto& p : kernel.params) pt.push_back(p.type);
+        funcSignatures_[kernel.name] = FuncInfo{kernel.isKernel, kernel.returnType, std::move(pt)};
+    }
+
     IRFunction fn;
+    fn.isKernel = kernel.isKernel;
+    fn.returnType = kernel.returnType;
     fn.name = kernel.name;
     fn.params = kernel.params;
 
@@ -40,17 +54,27 @@ IRFunction IRGen::emitKernel(const KernelDecl& kernel) {
         std::string paramPtxName = kernel.name + "_param_" + std::to_string(i);
 
         if (param.type.isPtr()) {
-            VReg rawReg = fn.freshReg(IRType::S64);
-            IRInst ldParam{IROp::LoadParam, rawReg, 0, 0, IRType::S64};
-            ldParam.paramIndex = static_cast<int>(i);
-            ldParam.paramName = paramPtxName;
-            fn.emit(ldParam);
+            if (kernel.isKernel) {
+                VReg rawReg = fn.freshReg(IRType::S64);
+                IRInst ldParam{IROp::LoadParam, rawReg, 0, 0, IRType::S64};
+                ldParam.paramIndex = static_cast<int>(i);
+                ldParam.paramName = paramPtxName;
+                fn.emit(ldParam);
 
-            VReg baseReg = fn.freshReg(IRType::S64);
-            IRInst cvta{IROp::CvtaGlobal, baseReg, rawReg, 0, IRType::S64};
-            fn.emit(cvta);
+                VReg baseReg = fn.freshReg(IRType::S64);
+                IRInst cvta{IROp::CvtaGlobal, baseReg, rawReg, 0, IRType::S64};
+                fn.emit(cvta);
 
-            setVar(param.name, baseReg, param.type);
+                setVar(param.name, baseReg, param.type);
+            } else {
+                VReg baseReg = fn.freshReg(IRType::S64);
+                IRInst ldParam{IROp::LoadParam, baseReg, 0, 0, IRType::S64};
+                ldParam.paramIndex = static_cast<int>(i);
+                ldParam.paramName = paramPtxName;
+                fn.emit(ldParam);
+
+                setVar(param.name, baseReg, param.type);
+            }
         } else if (param.type.isFloat()) {
             VReg pReg = fn.freshReg(IRType::F32);
             IRInst ldParam{IROp::LoadParam, pReg, 0, 0, IRType::F32};
@@ -59,6 +83,21 @@ IRFunction IRGen::emitKernel(const KernelDecl& kernel) {
             fn.emit(ldParam);
 
             setVar(param.name, pReg, param.type);
+        } else if (param.type.isBool()) {
+            VReg s32Reg = fn.freshReg(IRType::S32);
+            IRInst ldParam{IROp::LoadParam, s32Reg, 0, 0, IRType::S32};
+            ldParam.paramIndex = static_cast<int>(i);
+            ldParam.paramName = paramPtxName;
+            fn.emit(ldParam);
+
+            VReg predReg = fn.freshReg(IRType::Pred);
+            VReg zeroReg = fn.freshReg(IRType::S32);
+            IRInst zeroInst{IROp::LoadImm, zeroReg, 0, 0, IRType::S32};
+            zeroInst.immInt = 0;
+            fn.emit(zeroInst);
+            fn.emit(IRInst{IROp::SetpNe, predReg, s32Reg, zeroReg, IRType::S32});
+
+            setVar(param.name, predReg, param.type);
         } else {
             VReg pReg = fn.freshReg(IRType::S32);
             IRInst ldParam{IROp::LoadParam, pReg, 0, 0, IRType::S32};
@@ -111,9 +150,22 @@ void IRGen::emitStmtBody(const Stmt& stmt, IRFunction& fn) {
         fn.emit(IRInst{IROp::Bar, 0, 0, 0, IRType::S32});
     } else if (auto* shared = dynamic_cast<const SharedDeclStmt*>(&stmt)) {
         emitSharedDecl(*shared, fn);
-    } else if (dynamic_cast<const ReturnStmt*>(&stmt)) {
-        // ret in a .entry ends this thread. It terminates the block, so any statements after
-        // it go into a new block that nothing branches to (unreachable, but well-formed).
+    } else if (auto* ret = dynamic_cast<const ReturnStmt*>(&stmt)) {
+        if (ret->value) {
+            VReg valReg = emitExpr(*ret->value, fn);
+            if (fn.returnType.isFloat() && ret->value->resolvedType.isInt()) {
+                VReg cvtReg = fn.freshReg(IRType::F32);
+                fn.emit(IRInst{IROp::CvtI2F, cvtReg, valReg, 0, IRType::F32});
+                valReg = cvtReg;
+            } else if (fn.returnType.isBool()) {
+                VReg s32Reg = fn.freshReg(IRType::S32);
+                fn.emit(IRInst{IROp::CvtPredToS32, s32Reg, valReg, 0, IRType::S32});
+                valReg = s32Reg;
+            }
+            IRInst stRet{IROp::StoreRetval, 0, valReg, 0, fn.regType(valReg)};
+            stRet.symbol = fn.name + "_retval";
+            fn.emit(stRet);
+        }
         fn.emit(IRInst{IROp::Ret, 0, 0, 0, IRType::S32});
         fn.addBlock(fn.freshLabel("L_after_ret"));
     }
@@ -495,6 +547,9 @@ VReg IRGen::emitExpr(const Expr& expr, IRFunction& fn) {
     if (auto* cast = dynamic_cast<const CastExpr*>(&expr)) {
         return emitCastExpr(*cast, fn);
     }
+    if (auto* call = dynamic_cast<const CallExpr*>(&expr)) {
+        return emitCallExpr(*call, fn);
+    }
     return 0;
 }
 
@@ -611,6 +666,60 @@ VReg IRGen::emitCastExpr(const CastExpr& expr, IRFunction& fn) {
         fn.emit(IRInst{IROp::Mov, dst, sub, 0, t});
     }
     return dst;
+}
+
+VReg IRGen::emitCallExpr(const CallExpr& expr, IRFunction& fn) {
+    auto it = funcSignatures_.find(expr.callee);
+    std::vector<VReg> argRegs;
+    for (size_t i = 0; i < expr.args.size(); ++i) {
+        VReg argReg = emitExpr(*expr.args[i], fn);
+        if (it != funcSignatures_.end() && i < it->second.paramTypes.size()) {
+            Type expectedType = it->second.paramTypes[i];
+            if (expectedType.isFloat() && expr.args[i]->resolvedType.isInt()) {
+                VReg cvt = fn.freshReg(IRType::F32);
+                fn.emit(IRInst{IROp::CvtI2F, cvt, argReg, 0, IRType::F32});
+                argReg = cvt;
+            } else if (expectedType.isBool()) {
+                VReg s32 = fn.freshReg(IRType::S32);
+                fn.emit(IRInst{IROp::CvtPredToS32, s32, argReg, 0, IRType::S32});
+                argReg = s32;
+            }
+        }
+        argRegs.push_back(argReg);
+    }
+
+    Type retType = (it != funcSignatures_.end()) ? it->second.returnType : expr.resolvedType;
+    if (retType.isVoid()) {
+        IRInst callInst{IROp::Call, 0, 0, 0, IRType::S32};
+        callInst.symbol = expr.callee;
+        callInst.args = std::move(argRegs);
+        fn.emit(callInst);
+        return 0;
+    }
+
+    if (retType.isBool()) {
+        VReg abiReg = fn.freshReg(IRType::S32);
+        IRInst callInst{IROp::Call, abiReg, 0, 0, IRType::S32};
+        callInst.symbol = expr.callee;
+        callInst.args = std::move(argRegs);
+        fn.emit(callInst);
+
+        VReg predReg = fn.freshReg(IRType::Pred);
+        VReg zeroReg = fn.freshReg(IRType::S32);
+        IRInst zeroInst{IROp::LoadImm, zeroReg, 0, 0, IRType::S32};
+        zeroInst.immInt = 0;
+        fn.emit(zeroInst);
+        fn.emit(IRInst{IROp::SetpNe, predReg, abiReg, zeroReg, IRType::S32});
+        return predReg;
+    }
+
+    IRType irRet = retType.isFloat() ? IRType::F32 : IRType::S32;
+    VReg dstReg = fn.freshReg(irRet);
+    IRInst callInst{IROp::Call, dstReg, 0, 0, irRet};
+    callInst.symbol = expr.callee;
+    callInst.args = std::move(argRegs);
+    fn.emit(callInst);
+    return dstReg;
 }
 
 } // namespace kernc

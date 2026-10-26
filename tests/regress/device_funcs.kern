@@ -1,0 +1,22 @@
+// Calls in every position: as a statement, in a condition, in a loop, nested as arguments,
+// with bool/pointer/float/int parameters and returns, forward references, and recursion.
+func void bump(int* p, int i) { p[i] = p[i] + 1; }
+func bool positive(float v) { return v > 0.0; }
+func float clampf(float v, float lo, float hi) {
+    if (v < lo) { return lo; }
+    if (v > hi) { return hi; }
+    return v;
+}
+func int twice(int v) { return later(v) + later(v); }
+func int later(int v) { return v; }
+func int depth(int k) { if (k <= 0) { return 0; } return 1 + depth(k - 1); }
+
+kernel device_funcs(int* p, float* f, int n) {
+    int i = thread_idx;
+    bump(p, i);
+    if (positive(f[i]) && i < n) { f[i] = clampf(f[i], 0.0, 1.0); }
+    for (int k = 0; k < twice(2); k = k + 1) { bump(p, k); }
+    p[0] = depth(twice(later(3)));
+    bool b = positive(clampf(f[0], -1.0, 1.0));
+    if (b) { return; }
+}

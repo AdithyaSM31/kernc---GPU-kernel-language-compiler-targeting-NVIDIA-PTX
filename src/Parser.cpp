@@ -36,6 +36,9 @@ Token Parser::consume(TokenKind kind, const std::string& errorMsg) {
 }
 
 Type Parser::parseType() {
+    if (match(TokenKind::KW_void)) {
+        return Type::makeVoid();
+    }
     if (match(TokenKind::KW_int)) {
         if (match(TokenKind::Star)) {
             return Type::makeIntPtr();
@@ -69,7 +72,7 @@ Param Parser::parseParam() {
     return Param{type, std::string(nameTok.text), loc};
 }
 
-std::unique_ptr<KernelDecl> Parser::parseKernel() {
+std::unique_ptr<FunctionDecl> Parser::parseKernel() {
     SourceLocation startLoc = current_.loc;
     consume(TokenKind::KW_kernel, "expected 'kernel'");
     Token nameTok = consume(TokenKind::Identifier, "expected kernel name");
@@ -97,7 +100,45 @@ std::unique_ptr<KernelDecl> Parser::parseKernel() {
     SourceLocation endLoc = current_.loc;
     consume(TokenKind::RBrace, "expected '}' after kernel body");
 
-    auto decl = std::make_unique<KernelDecl>();
+    auto decl = std::make_unique<FunctionDecl>();
+    decl->name = std::string(nameTok.text);
+    decl->params = std::move(params);
+    decl->body = std::move(body);
+    decl->range = {startLoc, endLoc};
+    return decl;
+}
+
+std::unique_ptr<FunctionDecl> Parser::parseFunction() {
+    SourceLocation startLoc = current_.loc;
+    consume(TokenKind::KW_func, "expected 'func'");
+    Type returnType = parseType();
+    Token nameTok = consume(TokenKind::Identifier, "expected function name");
+    consume(TokenKind::LParen, "expected '(' after function name");
+
+    std::vector<Param> params;
+    if (!check(TokenKind::RParen)) {
+        do {
+            params.push_back(parseParam());
+        } while (match(TokenKind::Comma));
+    }
+    consume(TokenKind::RParen, "expected ')' after parameter list");
+
+    consume(TokenKind::LBrace, "expected '{' before function body");
+    std::vector<std::unique_ptr<Stmt>> body;
+    while (!check(TokenKind::RBrace) && !check(TokenKind::Eof)) {
+        auto stmt = parseStmt();
+        if (stmt) {
+            body.push_back(std::move(stmt));
+        } else if (hasError_) {
+            return nullptr;
+        }
+    }
+    SourceLocation endLoc = current_.loc;
+    consume(TokenKind::RBrace, "expected '}' after function body");
+
+    auto decl = std::make_unique<FunctionDecl>();
+    decl->isKernel = false;
+    decl->returnType = returnType;
     decl->name = std::string(nameTok.text);
     decl->params = std::move(params);
     decl->body = std::move(body);
@@ -109,11 +150,19 @@ std::unique_ptr<Program> Parser::parseProgram() {
     auto prog = std::make_unique<Program>();
     SourceLocation startLoc = current_.loc;
     while (!check(TokenKind::Eof)) {
-        auto kernel = parseKernel();
-        if (!kernel) {
+        std::unique_ptr<FunctionDecl> fn = nullptr;
+        if (check(TokenKind::KW_func)) {
+            fn = parseFunction();
+        } else if (check(TokenKind::KW_kernel)) {
+            fn = parseKernel();
+        } else {
+            consume(TokenKind::KW_kernel, "expected 'kernel' or 'func'");
             return nullptr;
         }
-        prog->kernels.push_back(std::move(kernel));
+        if (!fn) {
+            return nullptr;
+        }
+        prog->functions.push_back(std::move(fn));
     }
     prog->range = {startLoc, current_.loc};
     return prog;
@@ -435,14 +484,31 @@ std::unique_ptr<Expr> Parser::parsePrimary() {
         Token tok = advance();
         if (tok.text == "thread_idx") {
             expr = std::make_unique<BuiltinExpr>(BuiltinKind::ThreadIdx);
+            expr->range = {tok.loc, tok.loc};
         } else if (tok.text == "block_idx") {
             expr = std::make_unique<BuiltinExpr>(BuiltinKind::BlockIdx);
+            expr->range = {tok.loc, tok.loc};
         } else if (tok.text == "block_dim") {
             expr = std::make_unique<BuiltinExpr>(BuiltinKind::BlockDim);
+            expr->range = {tok.loc, tok.loc};
+        } else if (match(TokenKind::LParen)) {
+            std::vector<std::unique_ptr<Expr>> args;
+            if (!check(TokenKind::RParen)) {
+                do {
+                    auto arg = parseExpr();
+                    if (!arg) return nullptr;
+                    args.push_back(std::move(arg));
+                } while (match(TokenKind::Comma));
+            }
+            SourceLocation endLoc = current_.loc;
+            consume(TokenKind::RParen, "expected ')' after argument list");
+            auto call = std::make_unique<CallExpr>(std::string(tok.text), std::move(args));
+            call->range = {tok.loc, endLoc};
+            expr = std::move(call);
         } else {
             expr = std::make_unique<IdentExpr>(std::string(tok.text));
+            expr->range = {tok.loc, tok.loc};
         }
-        expr->range = {tok.loc, tok.loc};
     } else if (match(TokenKind::LParen)) {
         expr = parseExpr();
         consume(TokenKind::RParen, "expected ')' after expression");

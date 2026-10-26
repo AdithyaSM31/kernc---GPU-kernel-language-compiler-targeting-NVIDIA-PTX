@@ -21,6 +21,14 @@ TEST(LexerTest, Keywords) {
     EXPECT_EQ(lex.next().kind, TokenKind::Eof);
 }
 
+TEST(LexerTest, DeviceFuncKeywords) {
+    std::string src = "func void";
+    Lexer lex(src);
+    EXPECT_EQ(lex.next().kind, TokenKind::KW_func);
+    EXPECT_EQ(lex.next().kind, TokenKind::KW_void);
+    EXPECT_EQ(lex.next().kind, TokenKind::Eof);
+}
+
 TEST(LexerTest, IntegerLiterals) {
     std::string src = "0 42 1000 0x10 0xFF 0Xabcd";
     Lexer lex(src);

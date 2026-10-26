@@ -11,6 +11,8 @@ const char* Token::kindToString(TokenKind kind) {
         case TokenKind::FloatLiteral: return "FloatLiteral";
         case TokenKind::Identifier:   return "Identifier";
         case TokenKind::KW_kernel:    return "kernel";
+        case TokenKind::KW_func:      return "func";
+        case TokenKind::KW_void:      return "void";
         case TokenKind::KW_int:       return "int";
         case TokenKind::KW_float:     return "float";
         case TokenKind::KW_if:        return "if";
@@ -203,6 +205,8 @@ Token Lexer::lexIdentifierOrKeyword(SourceLocation startLoc) {
     tok.text = text;
 
     if (text == "kernel")      tok.kind = TokenKind::KW_kernel;
+    else if (text == "func")   tok.kind = TokenKind::KW_func;
+    else if (text == "void")   tok.kind = TokenKind::KW_void;
     else if (text == "int")    tok.kind = TokenKind::KW_int;
     else if (text == "float")  tok.kind = TokenKind::KW_float;
     else if (text == "if")     tok.kind = TokenKind::KW_if;

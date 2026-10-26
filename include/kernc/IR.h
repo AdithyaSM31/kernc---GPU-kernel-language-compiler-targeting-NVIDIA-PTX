@@ -60,6 +60,10 @@ enum class IROp {
     Bra,
     BraCond,
     Ret,
+    // Device Functions
+    Call,        // dst (0 for void) = call `symbol`(args...); dst/args use ABI types (no .pred)
+    StoreRetval, // st.param [<function>_retval], src1
+
     // GPU Specific
     ReadSReg,
     Bar
@@ -85,7 +89,8 @@ struct IRInst {
     std::string paramName;
 
     AddrSpace space = AddrSpace::Global; // Load / Store
-    std::string symbol;                  // SharedAddr
+    std::string symbol;                  // SharedAddr: array symbol; Call: callee name
+    std::vector<VReg> args;              // Call: argument registers, in order
 
     SourceLocation srcLoc;
 
@@ -109,6 +114,8 @@ struct SharedVar {
 };
 
 struct IRFunction {
+    bool isKernel = true;
+    Type returnType = Type::makeVoid();
     std::string name;
     std::vector<Param> params;
     std::vector<BasicBlock> blocks;

@@ -5,7 +5,7 @@
 
 using namespace kernc;
 
-static std::unique_ptr<KernelDecl> parseKernel(const std::string& src) {
+static std::unique_ptr<FunctionDecl> parseKernel(const std::string& src) {
     DiagnosticsEngine diag;
     Lexer lexer(src, &diag);
     Parser parser(lexer, diag);
@@ -139,6 +139,46 @@ TEST(ParserTest, ControlFlowStatements) {
     ASSERT_NE(forStmt->init, nullptr);
     ASSERT_NE(forStmt->cond, nullptr);
     ASSERT_NE(forStmt->step, nullptr);
+}
+
+TEST(ParserTest, DeviceFunctionsAndCalls) {
+    std::string src = "func float square(float x) { return x * x; }\n"
+                      "func void touch() { }\n"
+                      "kernel k(float* o) { o[0] = square(2.0); touch(); }\n";
+    DiagnosticsEngine diag;
+    Lexer lexer(src, &diag);
+    Parser parser(lexer, diag);
+    auto prog = parser.parseProgram();
+    ASSERT_NE(prog, nullptr) << diag.formatAll();
+    ASSERT_EQ(prog->functions.size(), 3u);
+
+    const FunctionDecl& square = *prog->functions[0];
+    EXPECT_FALSE(square.isKernel);
+    EXPECT_EQ(square.name, "square");
+    EXPECT_EQ(square.returnType.kind, Type::Float);
+    ASSERT_EQ(square.params.size(), 1u);
+    EXPECT_EQ(square.params[0].type.kind, Type::Float);
+
+    EXPECT_FALSE(prog->functions[1]->isKernel);
+    EXPECT_EQ(prog->functions[1]->returnType.kind, Type::Void);
+
+    const FunctionDecl& k = *prog->functions[2];
+    EXPECT_TRUE(k.isKernel);
+    ASSERT_EQ(k.body.size(), 2u);
+    auto* assign = dynamic_cast<AssignStmt*>(k.body[0].get());
+    ASSERT_NE(assign, nullptr);
+    auto* call = dynamic_cast<CallExpr*>(assign->value.get());
+    ASSERT_NE(call, nullptr);
+    EXPECT_EQ(call->callee, "square");
+    ASSERT_EQ(call->args.size(), 1u);
+    EXPECT_NE(dynamic_cast<FloatLiteralExpr*>(call->args[0].get()), nullptr);
+
+    // A void call is an expression statement.
+    auto* stmt = dynamic_cast<ExprStmt*>(k.body[1].get());
+    ASSERT_NE(stmt, nullptr);
+    auto* voidCall = dynamic_cast<CallExpr*>(stmt->expr.get());
+    ASSERT_NE(voidCall, nullptr);
+    EXPECT_TRUE(voidCall->args.empty());
 }
 
 TEST(ParserTest, SharedArrayDecl) {

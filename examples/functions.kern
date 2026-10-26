@@ -1,0 +1,62 @@
+// Device functions: `func` declares a PTX .func that kernels (and other functions) call.
+// Functions may be called before they are defined, including mutually recursive ones.
+
+func float square(float x) {
+    return x * x;
+}
+
+// bool crosses the call boundary as a 32-bit 0/1, since .param has no predicate type.
+func bool in_range(int i, int n) {
+    return i >= 0 && i < n;
+}
+
+// Pointer arguments are already global addresses; the callee does not cvta them again.
+func void store_twice(float* out, int i, float v) {
+    out[i] = v * 2.0;
+}
+
+// Recursion goes through the real ABI (ptxas gives fib a stack frame).
+func int fib(int k) {
+    if (k < 2) {
+        return k;
+    }
+    return fib(k - 1) + fib(k - 2);
+}
+
+func int collatz_steps(int v) {
+    int s = 0;
+    while (v != 1) {
+        if (v % 2 == 0) {
+            v = v / 2;
+        } else {
+            v = 3 * v + 1;
+        }
+        s = s + 1;
+    }
+    return s;
+}
+
+// Mutual recursion: is_even calls is_odd, which is defined after it.
+func bool is_even(int k) {
+    if (k == 0) {
+        return true;
+    }
+    return is_odd(k - 1);
+}
+
+func bool is_odd(int k) {
+    if (k == 0) {
+        return false;
+    }
+    return is_even(k - 1);
+}
+
+kernel use_functions(float* x, float* y, int* z, int n) {
+    int i = block_idx * block_dim + thread_idx;
+    if (!in_range(i, n)) return;
+    store_twice(y, i, square(x[i]));
+    z[i * 4] = fib(i % 15);
+    z[i * 4 + 1] = collatz_steps(i + 1);
+    z[i * 4 + 2] = cast<int>(is_even(i % 20));
+    z[i * 4 + 3] = cast<int>(in_range(i - 5, 10));
+}

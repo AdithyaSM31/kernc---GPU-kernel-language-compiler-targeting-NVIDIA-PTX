@@ -36,15 +36,26 @@ The compilation pipeline is organized into distinct phases with strict error bou
 
 ### 2. Parser (`include/kernc/Parser.h`, `src/Parser.cpp`)
 - Recursive-descent parser with precedence climbing for binary expressions.
+- Top-level constructs: `kernel` declarations and `func` device functions.
+- Function calls `f(args...)` parsed as primary expressions or expression statements.
 - Strict left-associativity enforcement for arithmetic, relational, and logical operators.
 - Strict single-ownership AST model using `std::unique_ptr<ASTNode>`.
 
 ### 3. Semantic Analysis (`include/kernc/Sema.h`, `src/Sema.cpp`)
+- Two-pass analysis:
+  - Pass 1 collects all function signatures (name, return type, parameter types) to support forward references and mutual recursion without header files. Reports redefinitions.
+  - Pass 2 type-checks bodies, statements, and expressions.
 - Lexical scoping using nested symbol tables (`std::vector<std::unordered_map<std::string, Type>>`).
 - Diagnostic verification for:
-  - Redefinitions in current scope.
-  - Undeclared identifier references.
+  - Redefinitions of variables and functions.
+  - Undeclared identifier references and undeclared function calls.
+  - Calling kernels from device code (kernels are host-launched only).
+  - Function argument count and argument type checking (implicit `int -> float` promotion allowed).
+  - Prohibiting void function calls as values.
+  - Return validation: type matching (`int -> float` allowed), void functions returning no value, non-void functions returning a value.
+  - Conservative all-paths-return analysis diagnosing missing returns in non-void functions.
+  - Device function restrictions: cannot return pointers, cannot declare shared memory arrays.
   - Pointer assignment constraints.
   - Type checking and implicit `int -> float` promotion rules.
-  - Subscript legality (base must be a pointer, index must be an integer).
+  - Subscript legality (base must be a pointer or shared array, index must be an integer).
   - Builtin reassignment rejection.

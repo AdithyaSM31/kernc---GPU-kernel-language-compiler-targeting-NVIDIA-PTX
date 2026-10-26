@@ -56,6 +56,8 @@ const char* irOpToString(IROp op) {
         case IROp::Bra:      return "bra";
         case IROp::BraCond:    return "bra.cond";
         case IROp::Ret:        return "ret";
+        case IROp::Call:       return "call";
+        case IROp::StoreRetval: return "st.retval";
         case IROp::ReadSReg:   return "readsreg";
         case IROp::Bar:        return "bar.sync";
     }
@@ -93,6 +95,14 @@ std::string IRInst::toString() const {
             break;
         case IROp::SharedAddr:
             ss << symbol;
+            break;
+        case IROp::Call:
+            ss << symbol << "(";
+            for (size_t i = 0; i < args.size(); ++i) ss << (i ? ", " : "") << "%v" << args[i];
+            ss << ")";
+            break;
+        case IROp::StoreRetval:
+            ss << "%v" << src1;
             break;
         case IROp::Neg:
         case IROp::FNeg:
