@@ -87,3 +87,28 @@ The IR is a non-SSA 3-address virtual-register code organized into Basic Blocks 
 
    - `tests/regress/name_collisions.kern` uses source names that match the old, underscore-based
      scheme (`entry`, `L_then_0`, `f_retval`, `param0`, `k_buf`, ...); ptxas and a GPU test check it.
+
+9. **Strength Reduction for Integer Division and Modulo by $2^k$**:
+   - `ptxas` treats `div.s32` and `rem.s32` literally: when emitted in PTX, `ptxas` lowers them to an iterative ~20-instruction Newton-Raphson approximation sequence using `MUFU.RCP`, even when the divisor is a constant power of two.
+   - `kernc`'s optimizer (`Optimizer::runConstantFolding`) lowers signed `/` and `%` by a constant power of two ($2^k$, $k \in [1, 30]$) into branchless shift/add/mask arithmetic that truncates toward zero:
+     - For $k = 1$ ($2^1 = 2$):
+       ```ptx
+       shr.u32 %r_sign, %r_x, 31;
+       add.s32 %r_biased, %r_x, %r_sign;
+       shr.s32 %r_out, %r_biased, 1;
+       ```
+       On sm_86, `ptxas` fuses `shr.u32` and `add.s32` into a single `LEA.HI` instruction, taking only 2 SASS instructions total.
+     - For $k \in [2, 30]$ ($2^k$):
+       ```ptx
+       shr.s32 %r_mask, %r_x, 31;
+       shr.u32 %r_bias, %r_mask, (32 - k);
+       add.s32 %r_biased, %r_x, %r_bias;
+       shr.s32 %r_out, %r_biased, k;
+       ```
+     - For signed modulo $x \pmod{2^k}$, the biased dividend is computed identically, masked with `-(1 << k)` to clear the lowest $k$ bits, and subtracted from $x$:
+       ```ptx
+       and.b32 %r_masked, %r_biased, -(1 << k);
+       sub.s32 %r_out, %r_x, %r_masked;
+       ```
+     - Identity cases: $x / 1 \to x$ (`mov`), $x \% 1 \to 0$ (`ldimm 0`).
+   - Differential testing (`StrengthReducedDivModMatchesUnoptimizedGPU`) runs across positive, negative, zero, and `INT_MIN` inputs against unoptimized `-O0` GPU execution, verifying bit-identical output.

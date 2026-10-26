@@ -499,3 +499,41 @@ TEST(IRPassTest, PTXEmissionValidStructure) {
     EXPECT_NE(ptx.find("st.global.s32"), std::string::npos);
     EXPECT_NE(ptx.find("ret;"), std::string::npos);
 }
+
+TEST(IRPassTest, StrengthReduceDivByPowerOfTwo) {
+    // Non-constant dividend divided by power of two must be lowered to shift/bias/add/shift.
+    // Div by 1 is identity (mov). Non-power-of-two remains div.s32.
+    std::string src = "kernel t(int* o, int x) {\n"
+                      "    o[0] = x / 2;\n"
+                      "    o[1] = x / 8;\n"
+                      "    o[2] = x / 1024;\n"
+                      "    o[3] = x / 3;\n"
+                      "    o[4] = x / 1;\n"
+                      "}\n";
+    auto fn = compileToIR(src);
+    Optimizer::runPasses(fn);
+
+    // Only x / 3 should remain as a Div op
+    EXPECT_EQ(countOps(fn, IROp::Div), 1) << fn.dump();
+    EXPECT_GT(countOps(fn, IROp::ShrS32), 0) << fn.dump();
+    EXPECT_GT(countOps(fn, IROp::ShrU32), 0) << fn.dump();
+}
+
+TEST(IRPassTest, StrengthReduceModByPowerOfTwo) {
+    // Non-constant dividend modulo power of two must be lowered to bias/add/and/sub.
+    // Mod by 1 is zero. Non-power-of-two remains rem.s32.
+    std::string src = "kernel t(int* o, int x) {\n"
+                      "    o[0] = x % 2;\n"
+                      "    o[1] = x % 4;\n"
+                      "    o[2] = x % 128;\n"
+                      "    o[3] = x % 5;\n"
+                      "    o[4] = x % 1;\n"
+                      "}\n";
+    auto fn = compileToIR(src);
+    Optimizer::runPasses(fn);
+
+    // Only x % 5 should remain as a Mod op
+    EXPECT_EQ(countOps(fn, IROp::Mod), 1) << fn.dump();
+    EXPECT_GT(countOps(fn, IROp::And), 0) << fn.dump();
+}
+

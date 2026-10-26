@@ -920,6 +920,74 @@ TEST_F(KernelE2ETest, ConstantFoldingMatchesUnoptimizedGPU) {
     }
 }
 
+static std::vector<int32_t> runStrengthReduceEdges(KernelE2ETest* fixture, bool optimize) {
+    const char* src =
+        "kernel test_div_mod_strength(int* out, int* in, int n) {\n"
+        "    int i = block_idx * block_dim + thread_idx;\n"
+        "    if (i < n) {\n"
+        "        int v = in[i];\n"
+        "        int base = i * 12;\n"
+        "        out[base + 0] = v / 2;\n"
+        "        out[base + 1] = v / 4;\n"
+        "        out[base + 2] = v / 16;\n"
+        "        out[base + 3] = v / 128;\n"
+        "        out[base + 4] = v / 1024;\n"
+        "        out[base + 5] = v / 1;\n"
+        "        out[base + 6] = v % 2;\n"
+        "        out[base + 7] = v % 4;\n"
+        "        out[base + 8] = v % 16;\n"
+        "        out[base + 9] = v % 128;\n"
+        "        out[base + 10] = v % 1024;\n"
+        "        out[base + 11] = v % 1;\n"
+        "    }\n"
+        "}\n";
+
+    std::vector<int32_t> h_in = {
+        0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 7, -7, 15, -15, 16, -16, 17, -17,
+        127, -127, 128, -128, 129, -129, 1023, -1023, 1024, -1024,
+        2147483647, -2147483647 - 1, -2147483647
+    };
+    int n = static_cast<int>(h_in.size());
+    const int opsPerItem = 12;
+    int totalOut = n * opsPerItem;
+
+    std::vector<int32_t> result(totalOut, 0);
+    std::string ptx = compileSourceToPTX(src, optimize);
+    EXPECT_FALSE(ptx.empty());
+    if (ptx.empty()) return result;
+
+    CUmodule mod = fixture->loadPTX(ptx);
+    if (!mod) return result;
+    CUfunction func;
+    EXPECT_EQ(cuModuleGetFunction(&func, mod, "test_div_mod_strength"), CUDA_SUCCESS);
+
+    CUdeviceptr d_in, d_out;
+    EXPECT_EQ(cuMemAlloc(&d_in, n * sizeof(int32_t)), CUDA_SUCCESS);
+    EXPECT_EQ(cuMemAlloc(&d_out, totalOut * sizeof(int32_t)), CUDA_SUCCESS);
+    EXPECT_EQ(cuMemcpyHtoD(d_in, h_in.data(), n * sizeof(int32_t)), CUDA_SUCCESS);
+
+    void* args[] = { &d_out, &d_in, &n };
+    EXPECT_EQ(cuLaunchKernel(func, 1, 1, 1, 32, 1, 1, 0, 0, args, 0), CUDA_SUCCESS);
+    EXPECT_EQ(cuCtxSynchronize(), CUDA_SUCCESS);
+
+    EXPECT_EQ(cuMemcpyDtoH(result.data(), d_out, totalOut * sizeof(int32_t)), CUDA_SUCCESS);
+
+    cuMemFree(d_in);
+    cuMemFree(d_out);
+    cuModuleUnload(mod);
+    return result;
+}
+
+TEST_F(KernelE2ETest, StrengthReducedDivModMatchesUnoptimizedGPU) {
+    std::vector<int32_t> unopt = runStrengthReduceEdges(this, false);
+    std::vector<int32_t> opt = runStrengthReduceEdges(this, true);
+    ASSERT_EQ(unopt.size(), opt.size());
+    ASSERT_FALSE(unopt.empty());
+    for (size_t k = 0; k < unopt.size(); ++k) {
+        EXPECT_EQ(opt[k], unopt[k]) << "output " << k << " differs between -O1 and -O0";
+    }
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     ::testing::AddGlobalTestEnvironment(new CudaEnvironment);

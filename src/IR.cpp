@@ -20,6 +20,10 @@ const char* irOpToString(IROp op) {
         case IROp::Mul:        return "mul";
         case IROp::Div:        return "div";
         case IROp::Mod:        return "rem";
+        case IROp::And:        return "and";
+        case IROp::Shl:        return "shl";
+        case IROp::ShrS32:     return "shr.s32";
+        case IROp::ShrU32:     return "shr.u32";
         case IROp::FAdd:       return "fadd";
         case IROp::FSub:       return "fsub";
         case IROp::FMul:       return "fmul";

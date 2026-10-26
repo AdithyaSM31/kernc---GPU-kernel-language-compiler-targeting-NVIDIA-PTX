@@ -71,7 +71,8 @@ bool Optimizer::runConstantFolding(IRFunction& fn) {
 
     // 3. Fold instructions
     for (auto& bb : fn.blocks) {
-        for (auto& inst : bb.instructions) {
+        for (size_t i = 0; i < bb.instructions.size(); ++i) {
+            auto& inst = bb.instructions[i];
             bool src1IsConst = (constTable.find(inst.src1) != constTable.end());
             bool src2IsConst = (constTable.find(inst.src2) != constTable.end());
 
@@ -94,6 +95,16 @@ bool Optimizer::runConstantFolding(IRFunction& fn) {
                         case IROp::Mod:
                             if (ptx::canFoldDivS32(c1.intVal, c2.intVal)) res = c1.intVal % c2.intVal;
                             else folded = false;
+                            break;
+                        case IROp::And: res = c1.intVal & c2.intVal; break;
+                        case IROp::Shl:
+                            res = ptx::wrap(static_cast<uint32_t>(c1.intVal) << (static_cast<uint32_t>(c2.intVal) & 31u));
+                            break;
+                        case IROp::ShrS32:
+                            res = c1.intVal >> (static_cast<uint32_t>(c2.intVal) & 31u);
+                            break;
+                        case IROp::ShrU32:
+                            res = ptx::wrap(static_cast<uint32_t>(c1.intVal) >> (static_cast<uint32_t>(c2.intVal) & 31u));
                             break;
                         default:
                             folded = false;
@@ -173,7 +184,7 @@ bool Optimizer::runConstantFolding(IRFunction& fn) {
                 }
             }
 
-            // Algebraic identities
+            // Algebraic identities and strength reduction
             if (src2IsConst && !constTable[inst.src2].isFloat) {
                 int32_t val = constTable[inst.src2].intVal;
                 if ((inst.op == IROp::Add || inst.op == IROp::Sub) && val == 0) {
@@ -194,6 +205,105 @@ bool Optimizer::runConstantFolding(IRFunction& fn) {
                     inst.src2 = 0;
                     inst.immInt = 0;
                     constTable[inst.dst] = ConstVal{false, 0, 0.0f};
+                    changed = true;
+                    continue;
+                }
+                if (inst.op == IROp::Div && val == 1) {
+                    inst.op = IROp::Mov;
+                    inst.src2 = 0;
+                    changed = true;
+                    continue;
+                }
+                if (inst.op == IROp::Mod && val == 1) {
+                    inst.op = IROp::LoadImm;
+                    inst.src1 = 0;
+                    inst.src2 = 0;
+                    inst.immInt = 0;
+                    constTable[inst.dst] = ConstVal{false, 0, 0.0f};
+                    changed = true;
+                    continue;
+                }
+                if ((inst.op == IROp::Div || inst.op == IROp::Mod) && val > 1 && ((val & (val - 1)) == 0)) {
+                    SourceLocation loc = inst.srcLoc;
+                    VReg x = inst.src1;
+                    VReg dst = inst.dst;
+                    int k = __builtin_ctz(static_cast<uint32_t>(val));
+                    std::vector<IRInst> newInsts;
+
+                    if (k == 1) {
+                        // k = 1: divisor is 2
+                        VReg r_sign = fn.freshReg(IRType::S32);
+                        VReg imm31 = fn.freshReg(IRType::S32);
+                        IRInst li31(IROp::LoadImm, imm31, 0, 0, IRType::S32); li31.immInt = 31; li31.srcLoc = loc;
+                        IRInst shr_sign(IROp::ShrU32, r_sign, x, imm31, IRType::S32); shr_sign.srcLoc = loc;
+
+                        VReg r_biased = fn.freshReg(IRType::S32);
+                        IRInst add_bias(IROp::Add, r_biased, x, r_sign, IRType::S32); add_bias.srcLoc = loc;
+
+                        newInsts.push_back(li31);
+                        newInsts.push_back(shr_sign);
+                        newInsts.push_back(add_bias);
+
+                        if (inst.op == IROp::Div) {
+                            VReg imm1 = fn.freshReg(IRType::S32);
+                            IRInst li1(IROp::LoadImm, imm1, 0, 0, IRType::S32); li1.immInt = 1; li1.srcLoc = loc;
+                            IRInst shr_out(IROp::ShrS32, dst, r_biased, imm1, IRType::S32); shr_out.srcLoc = loc;
+                            newInsts.push_back(li1);
+                            newInsts.push_back(shr_out);
+                        } else {
+                            VReg r_masked = fn.freshReg(IRType::S32);
+                            VReg immMask = fn.freshReg(IRType::S32);
+                            IRInst liMask(IROp::LoadImm, immMask, 0, 0, IRType::S32); liMask.immInt = -2; liMask.srcLoc = loc;
+                            IRInst and_inst(IROp::And, r_masked, r_biased, immMask, IRType::S32); and_inst.srcLoc = loc;
+                            IRInst sub_inst(IROp::Sub, dst, x, r_masked, IRType::S32); sub_inst.srcLoc = loc;
+                            newInsts.push_back(liMask);
+                            newInsts.push_back(and_inst);
+                            newInsts.push_back(sub_inst);
+                        }
+                    } else {
+                        // k in [2, 30]: divisor is 2^k
+                        VReg r_mask = fn.freshReg(IRType::S32);
+                        VReg imm31 = fn.freshReg(IRType::S32);
+                        IRInst li31(IROp::LoadImm, imm31, 0, 0, IRType::S32); li31.immInt = 31; li31.srcLoc = loc;
+                        IRInst shr_mask(IROp::ShrS32, r_mask, x, imm31, IRType::S32); shr_mask.srcLoc = loc;
+
+                        VReg r_bias = fn.freshReg(IRType::S32);
+                        VReg imm32MinusK = fn.freshReg(IRType::S32);
+                        IRInst li32(IROp::LoadImm, imm32MinusK, 0, 0, IRType::S32); li32.immInt = 32 - k; li32.srcLoc = loc;
+                        IRInst shr_bias(IROp::ShrU32, r_bias, r_mask, imm32MinusK, IRType::S32); shr_bias.srcLoc = loc;
+
+                        VReg r_biased = fn.freshReg(IRType::S32);
+                        IRInst add_bias(IROp::Add, r_biased, x, r_bias, IRType::S32); add_bias.srcLoc = loc;
+
+                        newInsts.push_back(li31);
+                        newInsts.push_back(shr_mask);
+                        newInsts.push_back(li32);
+                        newInsts.push_back(shr_bias);
+                        newInsts.push_back(add_bias);
+
+                        if (inst.op == IROp::Div) {
+                            VReg immK = fn.freshReg(IRType::S32);
+                            IRInst liK(IROp::LoadImm, immK, 0, 0, IRType::S32); liK.immInt = k; liK.srcLoc = loc;
+                            IRInst shr_out(IROp::ShrS32, dst, r_biased, immK, IRType::S32); shr_out.srcLoc = loc;
+                            newInsts.push_back(liK);
+                            newInsts.push_back(shr_out);
+                        } else {
+                            VReg r_masked = fn.freshReg(IRType::S32);
+                            VReg immMask = fn.freshReg(IRType::S32);
+                            IRInst liMask(IROp::LoadImm, immMask, 0, 0, IRType::S32);
+                            liMask.immInt = ptx::wrap(0u - (1u << k));
+                            liMask.srcLoc = loc;
+                            IRInst and_inst(IROp::And, r_masked, r_biased, immMask, IRType::S32); and_inst.srcLoc = loc;
+                            IRInst sub_inst(IROp::Sub, dst, x, r_masked, IRType::S32); sub_inst.srcLoc = loc;
+                            newInsts.push_back(liMask);
+                            newInsts.push_back(and_inst);
+                            newInsts.push_back(sub_inst);
+                        }
+                    }
+
+                    bb.instructions.erase(bb.instructions.begin() + i);
+                    bb.instructions.insert(bb.instructions.begin() + i, newInsts.begin(), newInsts.end());
+                    i += newInsts.size() - 1;
                     changed = true;
                     continue;
                 }

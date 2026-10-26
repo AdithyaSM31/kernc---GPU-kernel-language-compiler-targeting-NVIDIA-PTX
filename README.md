@@ -29,7 +29,7 @@ What it supports:
 - `.file` / `.loc` source line info with `-lineinfo`
 - diagnostics with `file:line:column` and a caret
 
-The suite has 97 tests, and all of them pass, both in a normal build and under
+The suite has 100 tests, and all of them pass, both in a normal build and under
 UndefinedBehaviorSanitizer.
 
 ---
@@ -226,18 +226,21 @@ The SASS is identical apart from register numbering. ptxas removed the duplicate
 computation, fused `mul.f32` + `add.f32` into `FFMA`, and turned the bounds check into
 `@P0 EXIT`. For a kernel this simple, ptxas cleans up kernc's PTX completely.
 
-The reduction is different. For `examples/reduce.kern`, kernc gets **70 SASS instructions and
-12 registers**; the equivalent CUDA gets **37 and 10**. The cause is `s / 2` on a signed int:
+The reduction is where front-end optimization matters. Originally, kernc emitted `div.s32` for `s = s / 2`,
+which ptxas expanded into a 20-instruction Newton-Raphson approximation sequence using `MUFU.RCP`, resulting
+in **70 SASS instructions and 12 registers** (compared to CUDA's **37 and 10**).
 
-- nvcc's front end emits the signed divide-by-two idiom in PTX (`shr.u32 31`, add,
-  `shr.s32 1`).
-- kernc emits `div.s32`, which ptxas expands into a full division sequence built around two
-  `MUFU.RCP` instructions; nvcc's version has none.
-- I tested whether an immediate divisor (`div.s32 %r, %r, 2`) helps. It doesn't: the count is
-  still 70.
+With strength reduction implemented in `kernc`'s optimizer (`-O1`), signed division and modulo by constant
+powers of two ($2^k$) are lowered to branchless shift/add/mask sequences that truncate toward zero:
 
-So strength reduction of signed division is the front end's job, and kernc's optimizer doesn't
-do it yet.
+- For $k = 1$ ($s / 2$): `shr.u32 %r_sign, %r_x, 31` $\to$ `add.s32 %r_biased, %r_x, %r_sign` $\to$ `shr.s32 %r_out, %r_biased, 1`.
+  On sm_86, ptxas fuses the shift and add into a single `LEA.HI` instruction!
+- Because loop bounds and strides are uniform across the CTA, ptxas scalarizes the division onto the
+  uniform datapath (`UR4`, `ULEA.HI`, `USHF.R.S32.HI`), freeing vector ALUs and vector registers.
+
+For `examples/reduce.kern`, kernc now achieves **36 executable SASS instructions and 8 registers**
+(48 instructions including exit NOP bundle alignment), matching `nvcc` (37 instructions, 10 registers)
+with zero `MUFU.RCP` instructions.
 
 ---
 
@@ -334,12 +337,13 @@ produce PTX that ptxas rejected. nvcc keeps its own labels apart the same way (`
 
 | Suite | Count | What it checks |
 |---|---|---|
-| Unit tests (GoogleTest) | 57 | Lexer 7, parser 10, Sema 18 (accept and reject cases, many checking `line:col`), IR and PTX 22 |
-| GPU end-to-end (Driver API) | 18 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
+| Unit tests (GoogleTest) | 59 | Lexer 7, parser 10, Sema 18 (accept and reject cases, many checking `line:col`), IR and PTX 24 |
+| GPU end-to-end (Driver API) | 19 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
 | Diagnostics | 1 suite, 8 files | `tests/diagnostic/err_*.kern` must fail with the expected message (and location, where given) |
 | ptxas acceptance | 6 | Every file in `examples/` assembles with `ptxas -arch=sm_86` |
 | ptxas regression | 12 | `tests/regress/*.kern` (6 kernels) assemble at both `-O0` and `-O1` |
 | Line tables | 2 | `kernc -lineinfo` → ptxas → `nvdisasm --print-line-info`; each `//@ REGEX` line must own matching SASS |
+| Runner CLI e2e | 1 suite, 20 stages | `kernc-runner` driver invocation, argument marshaling, device execution and error validation |
 
 The GPU tests cover:
 
@@ -354,7 +358,9 @@ The GPU tests cover:
   `f_retval`, `param0`, `k_buf`, …), which must compile and call the right function;
 - PTX with line info under `CU_JIT_GENERATE_LINE_INFO`;
 - a differential test where `-O0` and `-O1` must give bit-identical results on edge-case
-  constants.
+  constants;
+- a differential test where `-O0` (GPU `div.s32`/`rem.s32`) and `-O1` (strength-reduced shifts/masks)
+  must give bit-identical results across positive, negative, zero, and `INT_MIN` values for `/ 2^k` and `% 2^k`.
 
 Two techniques do most of the work:
 
@@ -365,7 +371,8 @@ Two techniques do most of the work:
   - `setp.ne` instead of `setp.neu` fails the NaN case;
   - removing `bar.sync` fails the block-reverse test, first at thread 64, the first thread of
     the third warp, which read data before its partner warp had written it;
-  - removing statement locations fails all six line-table checks.
+  - removing statement locations fails all six line-table checks;
+  - omitting the sign bias in power-of-two division fails the differential test on negative integers.
 
 ### Bugs the tests found
 

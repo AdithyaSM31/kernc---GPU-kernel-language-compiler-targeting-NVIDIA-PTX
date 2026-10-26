@@ -200,6 +200,18 @@ std::string PTXEmitter::emitFunction(const IRFunction& fn) {
                 case IROp::Mod:
                     ss << "    rem.s32 " << dst << ", " << s1 << ", " << s2 << ";\n";
                     break;
+                case IROp::And:
+                    ss << "    and.b32 " << dst << ", " << s1 << ", " << s2 << ";\n";
+                    break;
+                case IROp::Shl:
+                    ss << "    shl.b32 " << dst << ", " << s1 << ", " << s2 << ";\n";
+                    break;
+                case IROp::ShrS32:
+                    ss << "    shr.s32 " << dst << ", " << s1 << ", " << s2 << ";\n";
+                    break;
+                case IROp::ShrU32:
+                    ss << "    shr.u32 " << dst << ", " << s1 << ", " << s2 << ";\n";
+                    break;
                 case IROp::Neg:
                     ss << "    neg.s32 " << dst << ", " << s1 << ";\n";
                     break;
