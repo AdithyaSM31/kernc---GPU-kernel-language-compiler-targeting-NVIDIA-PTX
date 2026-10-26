@@ -537,3 +537,21 @@ TEST(IRPassTest, StrengthReduceModByPowerOfTwo) {
     EXPECT_GT(countOps(fn, IROp::And), 0) << fn.dump();
 }
 
+TEST(IRPassTest, FoldBitwiseOperations) {
+    auto v = storedConstants("kernel t(int* o) {\n"
+                             "    o[0] = 0xAA & 0x0F;\n"
+                             "    o[1] = 0xF0 | 0x0F;\n"
+                             "    o[2] = 0xFF ^ 0x0F;\n"
+                             "    o[3] = ~0;\n"
+                             "    o[4] = 1 << 4;\n"
+                             "    o[5] = -16 >> 2;\n"
+                             "}\n");
+    ASSERT_EQ(v.size(), 6u);
+    EXPECT_EQ(v[0], 0x0A);
+    EXPECT_EQ(v[1], 0xFF);
+    EXPECT_EQ(v[2], 0xF0);
+    EXPECT_EQ(v[3], -1);
+    EXPECT_EQ(v[4], 16);
+    EXPECT_EQ(v[5], -4);
+}
+

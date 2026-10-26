@@ -17,6 +17,11 @@ const char* binaryOpToString(BinaryOp op) {
         case BinaryOp::Ne:  return "!=";
         case BinaryOp::And: return "&&";
         case BinaryOp::Or:  return "||";
+        case BinaryOp::BitAnd: return "&";
+        case BinaryOp::BitOr:  return "|";
+        case BinaryOp::BitXor: return "^";
+        case BinaryOp::Shl:    return "<<";
+        case BinaryOp::Shr:    return ">>";
     }
     return "??";
 }
@@ -25,6 +30,7 @@ const char* unaryOpToString(UnaryOp op) {
     switch (op) {
         case UnaryOp::Neg: return "-";
         case UnaryOp::Not: return "!";
+        case UnaryOp::BitNot: return "~";
     }
     return "?";
 }

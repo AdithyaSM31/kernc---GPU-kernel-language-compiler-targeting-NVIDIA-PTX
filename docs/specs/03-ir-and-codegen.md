@@ -112,3 +112,19 @@ The IR is a non-SSA 3-address virtual-register code organized into Basic Blocks 
        ```
      - Identity cases: $x / 1 \to x$ (`mov`), $x \% 1 \to 0$ (`ldimm 0`).
    - Differential testing (`StrengthReducedDivModMatchesUnoptimizedGPU`) runs across positive, negative, zero, and `INT_MIN` inputs against unoptimized `-O0` GPU execution, verifying bit-identical output.
+
+10. **Bitwise Operators and Algebraic Identities**:
+    - The bitwise operators (`&`, `|`, `^`, `~`, `<<`, `>>`) operate on 32-bit `int` registers.
+    - IR lowering and PTX emission:
+      - `BitAnd` -> `IROp::And` -> `and.b32`
+      - `BitOr` -> `IROp::Or` -> `or.b32`
+      - `BitXor` -> `IROp::Xor` -> `xor.b32`
+      - `BitNot` -> `IROp::Not` -> `not.b32`
+      - `Shl` -> `IROp::Shl` -> `shl.b32`
+      - `Shr` -> `IROp::ShrS32` -> `shr.s32` (signed arithmetic shift)
+    - Target mapping: on Ampere sm_86, `ptxas` maps `and.b32`, `or.b32`, `xor.b32`, and `not.b32` to single-cycle `LOP3.LUT` instructions, and `shl.b32`/`shr.s32` to `SHF` instructions.
+    - Optimizer algebraic simplifications:
+      - Annihilators: `x & 0 = 0`, `x | -1 = -1`.
+      - Neutral elements: `x & -1 = x`, `x | 0 = x`, `x ^ 0 = x`, `x << 0 = x`, `x >> 0 = x`.
+      - Self-cancellation: `x ^ x = 0`, `x - x = 0`.
+      - Constant evaluation: `Passes.cpp` folds bitwise operations with full 32-bit unsigned wrapping semantics (`uint32_t`), ensuring identical behavior across host compilation and GPU target execution.

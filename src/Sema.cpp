@@ -521,6 +521,22 @@ Type Sema::checkBinaryExpr(BinaryExpr& expr) {
             }
             return expr.resolvedType;
         }
+
+        case BinaryOp::BitAnd:
+        case BinaryOp::BitOr:
+        case BinaryOp::BitXor:
+        case BinaryOp::Shl:
+        case BinaryOp::Shr: {
+            if (lhsType.isInt() && rhsType.isInt()) {
+                expr.resolvedType = Type::makeInt();
+            } else {
+                diag_.error(expr.range.begin, "operator '" +
+                    std::string(binaryOpToString(expr.op)) + "' requires integer operands (got '" +
+                    lhsType.toString() + "' and '" + rhsType.toString() + "')");
+                expr.resolvedType = Type::makeVoid();
+            }
+            return expr.resolvedType;
+        }
     }
     return Type::makeVoid();
 }
@@ -548,6 +564,13 @@ Type Sema::checkUnaryExpr(UnaryExpr& expr) {
             expr.resolvedType = Type::makeBool();
         } else {
             diag_.error(expr.range.begin, "unary '!' requires boolean or integer operand");
+            expr.resolvedType = Type::makeVoid();
+        }
+    } else if (expr.op == UnaryOp::BitNot) {
+        if (operandType.isInt()) {
+            expr.resolvedType = Type::makeInt();
+        } else {
+            diag_.error(expr.range.begin, "unary '~' requires integer operand (got '" + operandType.toString() + "')");
             expr.resolvedType = Type::makeVoid();
         }
     }

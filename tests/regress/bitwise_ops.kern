@@ -1,0 +1,14 @@
+// Regression test: bitwise operators and shifts compiled at -O0 and -O1.
+// Exercises and, or, xor, not, shl, shr.
+kernel test_regress_bitwise(int* out, int* in, int n) {
+    int i = block_idx * block_dim + thread_idx;
+    if (i < n) {
+        int x = in[i];
+        out[i * 6 + 0] = x & 0x0F0F0F0F;
+        out[i * 6 + 1] = x | 0x00FF00FF;
+        out[i * 6 + 2] = x ^ 0xAAAAAAAA;
+        out[i * 6 + 3] = ~x;
+        out[i * 6 + 4] = (x << 3) & 0x7FFFFFFF;
+        out[i * 6 + 5] = (x >> 2) | 0x00000001;
+    }
+}

@@ -988,6 +988,87 @@ TEST_F(KernelE2ETest, StrengthReducedDivModMatchesUnoptimizedGPU) {
     }
 }
 
+TEST_F(KernelE2ETest, BitwiseOperatorsMatchCpu) {
+    const char* src =
+        "kernel test_bitwise(int* out, int* a, int* b, int n) {\n"
+        "    int i = block_idx * block_dim + thread_idx;\n"
+        "    if (i < n) {\n"
+        "        int x = a[i];\n"
+        "        int y = b[i];\n"
+        "        int base = i * 8;\n"
+        "        out[base + 0] = x & y;\n"
+        "        out[base + 1] = x | y;\n"
+        "        out[base + 2] = x ^ y;\n"
+        "        out[base + 3] = ~x;\n"
+        "        out[base + 4] = x << (y % 31);\n"
+        "        out[base + 5] = x >> (y % 31);\n"
+        "        out[base + 6] = (x & y) ^ (x | y);\n"
+        "        out[base + 7] = ~(x ^ y);\n"
+        "    }\n"
+        "}\n";
+
+    std::vector<int32_t> h_a = {
+        0, 1, -1, 2, -2, 7, -7, 15, -15, 127, -127, 255, -255, 1024, -1024,
+        2147483647, -2147483647 - 1, 0x12345678, -0x12345678
+    };
+    std::vector<int32_t> h_b = {
+        0, 1, 2, 3, 5, 7, 11, 1, 2, 3, 4, 7, 8, 12, 16,
+        24, 30, 13, 27
+    };
+    ASSERT_EQ(h_a.size(), h_b.size());
+    int n = static_cast<int>(h_a.size());
+    const int opsPerItem = 8;
+    int totalOut = n * opsPerItem;
+
+    std::vector<int32_t> expected(totalOut, 0);
+    for (int i = 0; i < n; ++i) {
+        int32_t x = h_a[i];
+        int32_t y = h_b[i];
+        int shift = y % 31;
+        int base = i * opsPerItem;
+        expected[base + 0] = x & y;
+        expected[base + 1] = x | y;
+        expected[base + 2] = x ^ y;
+        expected[base + 3] = ~x;
+        expected[base + 4] = static_cast<int32_t>(static_cast<uint32_t>(x) << (shift & 31));
+        expected[base + 5] = x >> (shift & 31);
+        expected[base + 6] = (x & y) ^ (x | y);
+        expected[base + 7] = ~(x ^ y);
+    }
+
+    for (bool optimize : {false, true}) {
+        const char* opt = optimize ? "-O1" : "-O0";
+        std::string ptx = compileSourceToPTX(src, optimize);
+        ASSERT_FALSE(ptx.empty()) << opt;
+        CUmodule mod = loadPTX(ptx);
+        ASSERT_NE(mod, nullptr) << opt;
+        CUfunction func;
+        CHECK_CUDA(cuModuleGetFunction(&func, mod, "test_bitwise"));
+
+        std::vector<int32_t> h_out(totalOut, 0);
+        CUdeviceptr d_out, d_a, d_b;
+        CHECK_CUDA(cuMemAlloc(&d_out, totalOut * sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_a, n * sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_b, n * sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_a, h_a.data(), n * sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_b, h_b.data(), n * sizeof(int32_t)));
+
+        void* args[] = { &d_out, &d_a, &d_b, &n };
+        CHECK_CUDA(cuLaunchKernel(func, 1, 1, 1, 32, 1, 1, 0, 0, args, 0));
+        CHECK_CUDA(cuCtxSynchronize());
+        CHECK_CUDA(cuMemcpyDtoH(h_out.data(), d_out, totalOut * sizeof(int32_t)));
+
+        for (int k = 0; k < totalOut; ++k) {
+            EXPECT_EQ(h_out[k], expected[k]) << opt << " item " << k;
+        }
+
+        cuMemFree(d_out);
+        cuMemFree(d_a);
+        cuMemFree(d_b);
+        cuModuleUnload(mod);
+    }
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     ::testing::AddGlobalTestEnvironment(new CudaEnvironment);

@@ -151,3 +151,22 @@ TEST(LexerTest, Comments) {
     EXPECT_EQ(t3.kind, TokenKind::Semicolon);
     EXPECT_EQ(lex.next().kind, TokenKind::Eof);
 }
+
+TEST(LexerTest, BitwiseOperators) {
+    std::string src = "& | ^ ~ << >> && || < <= > >=";
+    Lexer lex(src);
+
+    EXPECT_EQ(lex.next().kind, TokenKind::Amp);
+    EXPECT_EQ(lex.next().kind, TokenKind::Pipe);
+    EXPECT_EQ(lex.next().kind, TokenKind::Caret);
+    EXPECT_EQ(lex.next().kind, TokenKind::Tilde);
+    EXPECT_EQ(lex.next().kind, TokenKind::LessLess);
+    EXPECT_EQ(lex.next().kind, TokenKind::GreaterGreater);
+    EXPECT_EQ(lex.next().kind, TokenKind::AmpAmp);
+    EXPECT_EQ(lex.next().kind, TokenKind::PipePipe);
+    EXPECT_EQ(lex.next().kind, TokenKind::Less);
+    EXPECT_EQ(lex.next().kind, TokenKind::LessEq);
+    EXPECT_EQ(lex.next().kind, TokenKind::Greater);
+    EXPECT_EQ(lex.next().kind, TokenKind::GreaterEq);
+    EXPECT_EQ(lex.next().kind, TokenKind::Eof);
+}

@@ -232,3 +232,53 @@ TEST(ParserTest, ReturnStatement) {
     ASSERT_NE(withValue, nullptr);
     EXPECT_NE(dynamic_cast<IdentExpr*>(withValue->value.get()), nullptr);
 }
+
+TEST(ParserTest, BitwiseOperatorPrecedence) {
+    // a | b ^ c & d should parse as a | (b ^ (c & d))
+    std::string src = "kernel test() { int x = a | b ^ c & d; }";
+    auto k = parseKernel(src);
+    ASSERT_NE(k, nullptr);
+    ASSERT_EQ(k->body.size(), 1u);
+    auto* decl = dynamic_cast<VarDeclStmt*>(k->body[0].get());
+    ASSERT_NE(decl, nullptr);
+    auto* orBin = dynamic_cast<BinaryExpr*>(decl->init.get());
+    ASSERT_NE(orBin, nullptr);
+    EXPECT_EQ(orBin->op, BinaryOp::BitOr);
+
+    auto* xorBin = dynamic_cast<BinaryExpr*>(orBin->rhs.get());
+    ASSERT_NE(xorBin, nullptr);
+    EXPECT_EQ(xorBin->op, BinaryOp::BitXor);
+
+    auto* andBin = dynamic_cast<BinaryExpr*>(xorBin->rhs.get());
+    ASSERT_NE(andBin, nullptr);
+    EXPECT_EQ(andBin->op, BinaryOp::BitAnd);
+}
+
+TEST(ParserTest, ShiftAndAdditivePrecedence) {
+    // a + b << c should parse as (a + b) << c
+    std::string src = "kernel test() { int x = a + b << c; }";
+    auto k = parseKernel(src);
+    ASSERT_NE(k, nullptr);
+    ASSERT_EQ(k->body.size(), 1u);
+    auto* decl = dynamic_cast<VarDeclStmt*>(k->body[0].get());
+    ASSERT_NE(decl, nullptr);
+    auto* shlBin = dynamic_cast<BinaryExpr*>(decl->init.get());
+    ASSERT_NE(shlBin, nullptr);
+    EXPECT_EQ(shlBin->op, BinaryOp::Shl);
+
+    auto* addBin = dynamic_cast<BinaryExpr*>(shlBin->lhs.get());
+    ASSERT_NE(addBin, nullptr);
+    EXPECT_EQ(addBin->op, BinaryOp::Add);
+}
+
+TEST(ParserTest, UnaryBitwiseNot) {
+    std::string src = "kernel test() { int x = ~a; }";
+    auto k = parseKernel(src);
+    ASSERT_NE(k, nullptr);
+    ASSERT_EQ(k->body.size(), 1u);
+    auto* decl = dynamic_cast<VarDeclStmt*>(k->body[0].get());
+    ASSERT_NE(decl, nullptr);
+    auto* notExpr = dynamic_cast<UnaryExpr*>(decl->init.get());
+    ASSERT_NE(notExpr, nullptr);
+    EXPECT_EQ(notExpr->op, UnaryOp::BitNot);
+}

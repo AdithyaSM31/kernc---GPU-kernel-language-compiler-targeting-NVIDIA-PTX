@@ -605,11 +605,16 @@ VReg IRGen::emitBinaryExpr(const BinaryExpr& expr, IRFunction& fn) {
         }
     } else {
         switch (expr.op) {
-            case BinaryOp::Add: op = IROp::Add; break;
-            case BinaryOp::Sub: op = IROp::Sub; break;
-            case BinaryOp::Mul: op = IROp::Mul; break;
-            case BinaryOp::Div: op = IROp::Div; break;
-            case BinaryOp::Mod: op = IROp::Mod; break;
+            case BinaryOp::Add:    op = IROp::Add; break;
+            case BinaryOp::Sub:    op = IROp::Sub; break;
+            case BinaryOp::Mul:    op = IROp::Mul; break;
+            case BinaryOp::Div:    op = IROp::Div; break;
+            case BinaryOp::Mod:    op = IROp::Mod; break;
+            case BinaryOp::BitAnd: op = IROp::And; break;
+            case BinaryOp::BitOr:  op = IROp::Or; break;
+            case BinaryOp::BitXor: op = IROp::Xor; break;
+            case BinaryOp::Shl:    op = IROp::Shl; break;
+            case BinaryOp::Shr:    op = IROp::ShrS32; break;
             default: op = IROp::Add; break;
         }
     }
@@ -623,6 +628,12 @@ VReg IRGen::emitUnaryExpr(const UnaryExpr& expr, IRFunction& fn) {
         VReg operand = emitAsPred(*expr.operand, fn); // accepts bool or int
         VReg dst = fn.freshReg(IRType::Pred);
         fn.emit(IRInst{IROp::NotPred, dst, operand, 0, IRType::Pred});
+        return dst;
+    }
+    if (expr.op == UnaryOp::BitNot) {
+        VReg sub = emitExpr(*expr.operand, fn);
+        VReg dst = fn.freshReg(IRType::S32);
+        fn.emit(IRInst{IROp::Not, dst, sub, 0, IRType::S32});
         return dst;
     }
 

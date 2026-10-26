@@ -41,6 +41,12 @@ const char* Token::kindToString(TokenKind kind) {
         case TokenKind::PipePipe:     return "||";
         case TokenKind::Bang:         return "!";
         case TokenKind::Eq:           return "=";
+        case TokenKind::Amp:          return "&";
+        case TokenKind::Pipe:         return "|";
+        case TokenKind::Caret:        return "^";
+        case TokenKind::Tilde:        return "~";
+        case TokenKind::LessLess:     return "<<";
+        case TokenKind::GreaterGreater: return ">>";
         case TokenKind::LParen:       return "(";
         case TokenKind::RParen:       return ")";
         case TokenKind::LBrace:       return "{";
@@ -307,12 +313,20 @@ Token Lexer::next() {
                 getChar();
                 return makeToken(TokenKind::LessEq, 2);
             }
+            if (peekChar() == '<') {
+                getChar();
+                return makeToken(TokenKind::LessLess, 2);
+            }
             return makeToken(TokenKind::Less, 1);
 
         case '>':
             if (peekChar() == '=') {
                 getChar();
                 return makeToken(TokenKind::GreaterEq, 2);
+            }
+            if (peekChar() == '>') {
+                getChar();
+                return makeToken(TokenKind::GreaterGreater, 2);
             }
             return makeToken(TokenKind::Greater, 1);
 
@@ -321,14 +335,20 @@ Token Lexer::next() {
                 getChar();
                 return makeToken(TokenKind::AmpAmp, 2);
             }
-            break;
+            return makeToken(TokenKind::Amp, 1);
 
         case '|':
             if (peekChar() == '|') {
                 getChar();
                 return makeToken(TokenKind::PipePipe, 2);
             }
-            break;
+            return makeToken(TokenKind::Pipe, 1);
+
+        case '^':
+            return makeToken(TokenKind::Caret, 1);
+
+        case '~':
+            return makeToken(TokenKind::Tilde, 1);
     }
 
     // Unknown/Error token

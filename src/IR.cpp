@@ -21,6 +21,9 @@ const char* irOpToString(IROp op) {
         case IROp::Div:        return "div";
         case IROp::Mod:        return "rem";
         case IROp::And:        return "and";
+        case IROp::Or:         return "or";
+        case IROp::Xor:        return "xor";
+        case IROp::Not:        return "not";
         case IROp::Shl:        return "shl";
         case IROp::ShrS32:     return "shr.s32";
         case IROp::ShrU32:     return "shr.u32";
@@ -110,6 +113,7 @@ std::string IRInst::toString() const {
             break;
         case IROp::Neg:
         case IROp::FNeg:
+        case IROp::Not:
         case IROp::CvtF2I:
         case IROp::CvtI2F:
         case IROp::CvtPredToS32:

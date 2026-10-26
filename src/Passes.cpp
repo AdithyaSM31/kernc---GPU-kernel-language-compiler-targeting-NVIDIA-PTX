@@ -97,6 +97,8 @@ bool Optimizer::runConstantFolding(IRFunction& fn) {
                             else folded = false;
                             break;
                         case IROp::And: res = c1.intVal & c2.intVal; break;
+                        case IROp::Or:  res = c1.intVal | c2.intVal; break;
+                        case IROp::Xor: res = c1.intVal ^ c2.intVal; break;
                         case IROp::Shl:
                             res = ptx::wrap(static_cast<uint32_t>(c1.intVal) << (static_cast<uint32_t>(c2.intVal) & 31u));
                             break;
@@ -155,6 +157,13 @@ bool Optimizer::runConstantFolding(IRFunction& fn) {
                     inst.op = IROp::LoadImm;
                     inst.src1 = 0;
                     inst.immInt = ptx::negS32(c1.intVal);
+                    constTable[inst.dst] = ConstVal{false, inst.immInt, 0.0f};
+                    changed = true;
+                    continue;
+                } else if (inst.op == IROp::Not && !c1.isFloat) {
+                    inst.op = IROp::LoadImm;
+                    inst.src1 = 0;
+                    inst.immInt = ~c1.intVal;
                     constTable[inst.dst] = ConstVal{false, inst.immInt, 0.0f};
                     changed = true;
                     continue;
@@ -220,6 +229,37 @@ bool Optimizer::runConstantFolding(IRFunction& fn) {
                     inst.src2 = 0;
                     inst.immInt = 0;
                     constTable[inst.dst] = ConstVal{false, 0, 0.0f};
+                    changed = true;
+                    continue;
+                }
+                if (inst.op == IROp::And && val == 0) {
+                    inst.op = IROp::LoadImm;
+                    inst.src1 = 0;
+                    inst.src2 = 0;
+                    inst.immInt = 0;
+                    constTable[inst.dst] = ConstVal{false, 0, 0.0f};
+                    changed = true;
+                    continue;
+                }
+                if (inst.op == IROp::And && val == -1) {
+                    inst.op = IROp::Mov;
+                    inst.src2 = 0;
+                    changed = true;
+                    continue;
+                }
+                if ((inst.op == IROp::Or || inst.op == IROp::Xor || inst.op == IROp::Shl ||
+                     inst.op == IROp::ShrS32 || inst.op == IROp::ShrU32) && val == 0) {
+                    inst.op = IROp::Mov;
+                    inst.src2 = 0;
+                    changed = true;
+                    continue;
+                }
+                if (inst.op == IROp::Or && val == -1) {
+                    inst.op = IROp::LoadImm;
+                    inst.src1 = 0;
+                    inst.src2 = 0;
+                    inst.immInt = -1;
+                    constTable[inst.dst] = ConstVal{false, -1, 0.0f};
                     changed = true;
                     continue;
                 }
@@ -325,6 +365,51 @@ bool Optimizer::runConstantFolding(IRFunction& fn) {
                     continue;
                 }
                 if (inst.op == IROp::Mul && val == 0) {
+                    inst.op = IROp::LoadImm;
+                    inst.src1 = 0;
+                    inst.src2 = 0;
+                    inst.immInt = 0;
+                    constTable[inst.dst] = ConstVal{false, 0, 0.0f};
+                    changed = true;
+                    continue;
+                }
+                if (inst.op == IROp::And && val == 0) {
+                    inst.op = IROp::LoadImm;
+                    inst.src1 = 0;
+                    inst.src2 = 0;
+                    inst.immInt = 0;
+                    constTable[inst.dst] = ConstVal{false, 0, 0.0f};
+                    changed = true;
+                    continue;
+                }
+                if (inst.op == IROp::And && val == -1) {
+                    inst.op = IROp::Mov;
+                    inst.src1 = inst.src2;
+                    inst.src2 = 0;
+                    changed = true;
+                    continue;
+                }
+                if ((inst.op == IROp::Or || inst.op == IROp::Xor) && val == 0) {
+                    inst.op = IROp::Mov;
+                    inst.src1 = inst.src2;
+                    inst.src2 = 0;
+                    changed = true;
+                    continue;
+                }
+                if (inst.op == IROp::Or && val == -1) {
+                    inst.op = IROp::LoadImm;
+                    inst.src1 = 0;
+                    inst.src2 = 0;
+                    inst.immInt = -1;
+                    constTable[inst.dst] = ConstVal{false, -1, 0.0f};
+                    changed = true;
+                    continue;
+                }
+            }
+
+            // Self-identities: x ^ x = 0, x - x = 0
+            if (inst.src1 != 0 && inst.src1 == inst.src2 && inst.dst != 0) {
+                if (inst.op == IROp::Xor || inst.op == IROp::Sub) {
                     inst.op = IROp::LoadImm;
                     inst.src1 = 0;
                     inst.src2 = 0;

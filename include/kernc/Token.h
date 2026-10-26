@@ -46,6 +46,12 @@ enum class TokenKind {
     PipePipe,   // ||
     Bang,       // !
     Eq,         // =
+    Amp,            // &
+    Pipe,           // |
+    Caret,          // ^
+    Tilde,          // ~
+    LessLess,       // <<
+    GreaterGreater, // >>
 
     // Delimiters
     LParen,     // (

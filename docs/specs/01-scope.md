@@ -29,11 +29,15 @@
 
 ### Operators
 - Arithmetic: `+`, `-`, `*`, `/`, `%` (`%` is int-only, lowering to `rem.s32`).
-- Unary: `-` (arithmetic negation), `!` (logical NOT).
+- Bitwise: `&`, `|`, `^`, `<<`, `>>` on 32-bit `int` operands, lowering to `and.b32`, `or.b32`, `xor.b32`, `shl.b32`, `shr.s32`.
+- Unary: `-` (arithmetic negation), `!` (logical NOT), `~` (bitwise NOT, `not.b32` on `int`).
 - Comparison: `<`, `<=`, `>`, `>=`, `==`, `!=` on `int`/`float`; `==`, `!=` also on two `bool`s.
   Float comparisons follow C: all are false when an operand is NaN, except `!=`, which is true
   (lowered to the unordered `setp.neu.f32`).
 - Logical: `&&`, `||` with short-circuit evaluation, both in conditions and as values.
+- Precedence: Precedence climbing strictly follows ISO C:
+  `||` < `&&` < `|` < `^` < `&` < `==`/`!=` < `<`/`<=`/`>`/`>=` < `<<`/`>>` < `+`/`-` < `*`/`/`/`%`
+  Unary operators `!`, `-`, `~` have higher precedence than binary operators.
 - Subscript / Indexing: `ptr[expr]` for pointer dereferencing and offset calculation.
 - Explicit Cast: `cast<type>(expr)` between `int`, `float` and `bool`. `cast<bool>(x)` is
   `x != 0` (NaN is true); `cast<int>(b)` / `cast<float>(b)` give 1 or 0.

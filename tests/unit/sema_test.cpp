@@ -282,3 +282,37 @@ TEST(SemaTest, NonIntSubscript) {
     EXPECT_TRUE(diag.hasErrors());
     EXPECT_NE(diag.formatAll().find("array subscript is not an integer"), std::string::npos);
 }
+
+TEST(SemaTest, BitwiseOperatorsOnIntsAccepted) {
+    std::string src = "kernel test(int a, int b) {\n"
+                      "    int c = (a & b) | (a ^ b);\n"
+                      "    int d = (a << 2) >> 1;\n"
+                      "    int e = ~a;\n"
+                      "}\n";
+    DiagnosticsEngine diag;
+    bool ok = checkSource(src, diag);
+    EXPECT_TRUE(ok) << diag.formatAll();
+    EXPECT_FALSE(diag.hasErrors());
+}
+
+TEST(SemaTest, BitwiseOperatorsOnFloatsRejected) {
+    std::string src = "kernel test(float a, int b) {\n"
+                      "    int c = a & b;\n"
+                      "}\n";
+    DiagnosticsEngine diag;
+    bool ok = checkSource(src, diag);
+    EXPECT_FALSE(ok);
+    EXPECT_TRUE(diag.hasErrors());
+    EXPECT_NE(diag.formatAll().find("operator '&' requires integer operands"), std::string::npos);
+}
+
+TEST(SemaTest, BitwiseNotOnFloatRejected) {
+    std::string src = "kernel test(float a) {\n"
+                      "    float c = ~a;\n"
+                      "}\n";
+    DiagnosticsEngine diag;
+    bool ok = checkSource(src, diag);
+    EXPECT_FALSE(ok);
+    EXPECT_TRUE(diag.hasErrors());
+    EXPECT_NE(diag.formatAll().find("unary '~' requires integer operand"), std::string::npos);
+}

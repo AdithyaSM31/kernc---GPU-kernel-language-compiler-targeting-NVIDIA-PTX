@@ -25,11 +25,12 @@ What it supports:
 - `if` / `else`, `while`, `for`, `return`, `barrier()`
 - short-circuit `&&` / `||`, in conditions and as values
 - explicit `cast<T>()` between `int`, `float` and `bool`
-- constant folding and dead-code elimination
+- bitwise operators (`&`, `|`, `^`, `~`, `<<`, `>>`) on `int` with ISO C precedence
+- constant folding, algebraic simplification, and dead-code elimination
 - `.file` / `.loc` source line info with `-lineinfo`
 - diagnostics with `file:line:column` and a caret
 
-The suite has 100 tests, and all of them pass, both in a normal build and under
+The suite has 111 tests, and all of them pass, both in a normal build and under
 UndefinedBehaviorSanitizer.
 
 ---
@@ -105,7 +106,7 @@ The full reference is in [docs/specs/01-scope.md](docs/specs/01-scope.md).
 | Types | `int` (`.s32`), `float` (`.f32`), `bool` (`.pred`); `int*` / `float*` as parameters |
 | Built-ins | `thread_idx` → `%tid.x`, `block_idx` → `%ctaid.x`, `block_dim` → `%ntid.x` (x dimension only) |
 | Statements | declarations, assignment, `if`/`else`, `while`, `for`, `return`, `barrier();`, `shared T name[N];`, function calls |
-| Operators | `+ - * / %`, unary `- !`, `< <= > >= == !=`, `&&` `\|\|` (short-circuit), `p[i]` |
+| Operators | `+ - * / %`, unary `- ! ~`, `& \| ^ << >>`, `< <= > >= == !=`, `&&` `\|\|` (short-circuit), `p[i]` |
 | Casts | `cast<int>(x)`, `cast<float>(x)`, `cast<bool>(x)` |
 
 Rules that matter for correctness:
@@ -397,8 +398,10 @@ Every fix is in the commit history, together with a test that failed before the 
 
 ## Limitations and next steps
 
-- **Strength reduction of signed `/` and `%` by powers of two.** This is the measured gap
-  against nvcc in the reduction (see above). `% 128` has the same problem.
+- **Strength reduction for non-power-of-two constants.** Signed `/` and `%` by $2^k$ are
+  already strength-reduced to branchless shift/add/mask sequences (see above). Dividing by
+  arbitrary invariant constants via fixed-point multiplication (Granlund-Montgomery / magic
+  numbers) is a natural next step.
 - **No CSE or copy propagation in kernc.** For SAXPY ptxas makes up for it, as shown above,
   but kernc's own PTX still recomputes addresses and reloads constants.
 - **No inlining.** ptxas keeps every device-function call as a real `CALL` with the ABI's

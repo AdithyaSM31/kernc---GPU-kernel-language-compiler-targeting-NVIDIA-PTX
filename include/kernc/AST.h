@@ -113,7 +113,8 @@ struct BuiltinExpr : public Expr {
 enum class BinaryOp {
     Add, Sub, Mul, Div, Mod,
     Lt, Gt, Le, Ge, Eq, Ne,
-    And, Or
+    And, Or,
+    BitAnd, BitOr, BitXor, Shl, Shr
 };
 
 const char* binaryOpToString(BinaryOp op);
@@ -128,7 +129,8 @@ struct BinaryExpr : public Expr {
 
 enum class UnaryOp {
     Neg,
-    Not
+    Not,
+    BitNot
 };
 
 const char* unaryOpToString(UnaryOp op);

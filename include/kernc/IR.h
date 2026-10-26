@@ -44,7 +44,7 @@ enum class IROp {
     // Integer Arithmetic
     Add, Sub, Mul, Div, Mod,
     // Bitwise and Shifts
-    And, Shl, ShrS32, ShrU32,
+    And, Or, Xor, Not, Shl, ShrS32, ShrU32,
     // Float Arithmetic
     FAdd, FSub, FMul, FDiv,
     // Unary Negate

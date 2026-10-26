@@ -371,38 +371,48 @@ std::unique_ptr<Stmt> Parser::parseExprOrAssignStmt() {
 
 int Parser::getBinaryPrecedence(TokenKind kind) const {
     switch (kind) {
-        case TokenKind::PipePipe:   return 1;
-        case TokenKind::AmpAmp:     return 2;
+        case TokenKind::PipePipe:       return 1;
+        case TokenKind::AmpAmp:         return 2;
+        case TokenKind::Pipe:           return 3;
+        case TokenKind::Caret:          return 4;
+        case TokenKind::Amp:            return 5;
         case TokenKind::EqEq:
-        case TokenKind::BangEq:     return 3;
+        case TokenKind::BangEq:         return 6;
         case TokenKind::Less:
         case TokenKind::LessEq:
         case TokenKind::Greater:
-        case TokenKind::GreaterEq:  return 4;
+        case TokenKind::GreaterEq:      return 7;
+        case TokenKind::LessLess:
+        case TokenKind::GreaterGreater: return 8;
         case TokenKind::Plus:
-        case TokenKind::Minus:      return 5;
+        case TokenKind::Minus:          return 9;
         case TokenKind::Star:
         case TokenKind::Slash:
-        case TokenKind::Percent:    return 6;
+        case TokenKind::Percent:        return 10;
         default: return 0;
     }
 }
 
 BinaryOp Parser::tokenToBinaryOp(TokenKind kind) const {
     switch (kind) {
-        case TokenKind::PipePipe:   return BinaryOp::Or;
-        case TokenKind::AmpAmp:     return BinaryOp::And;
-        case TokenKind::EqEq:       return BinaryOp::Eq;
-        case TokenKind::BangEq:     return BinaryOp::Ne;
-        case TokenKind::Less:       return BinaryOp::Lt;
-        case TokenKind::LessEq:     return BinaryOp::Le;
-        case TokenKind::Greater:    return BinaryOp::Gt;
-        case TokenKind::GreaterEq:  return BinaryOp::Ge;
-        case TokenKind::Plus:       return BinaryOp::Add;
-        case TokenKind::Minus:      return BinaryOp::Sub;
-        case TokenKind::Star:       return BinaryOp::Mul;
-        case TokenKind::Slash:      return BinaryOp::Div;
-        case TokenKind::Percent:    return BinaryOp::Mod;
+        case TokenKind::PipePipe:       return BinaryOp::Or;
+        case TokenKind::AmpAmp:         return BinaryOp::And;
+        case TokenKind::Pipe:           return BinaryOp::BitOr;
+        case TokenKind::Caret:          return BinaryOp::BitXor;
+        case TokenKind::Amp:            return BinaryOp::BitAnd;
+        case TokenKind::EqEq:           return BinaryOp::Eq;
+        case TokenKind::BangEq:         return BinaryOp::Ne;
+        case TokenKind::Less:           return BinaryOp::Lt;
+        case TokenKind::LessEq:         return BinaryOp::Le;
+        case TokenKind::Greater:        return BinaryOp::Gt;
+        case TokenKind::GreaterEq:      return BinaryOp::Ge;
+        case TokenKind::LessLess:       return BinaryOp::Shl;
+        case TokenKind::GreaterGreater: return BinaryOp::Shr;
+        case TokenKind::Plus:           return BinaryOp::Add;
+        case TokenKind::Minus:          return BinaryOp::Sub;
+        case TokenKind::Star:           return BinaryOp::Mul;
+        case TokenKind::Slash:          return BinaryOp::Div;
+        case TokenKind::Percent:        return BinaryOp::Mod;
         default: return BinaryOp::Add;
     }
 }
@@ -441,6 +451,13 @@ std::unique_ptr<Expr> Parser::parseUnary() {
         auto operand = parseUnary();
         if (!operand) return nullptr;
         auto expr = std::make_unique<UnaryExpr>(UnaryOp::Not, std::move(operand));
+        expr->range = {startLoc, expr->operand->range.end};
+        return expr;
+    }
+    if (match(TokenKind::Tilde)) {
+        auto operand = parseUnary();
+        if (!operand) return nullptr;
+        auto expr = std::make_unique<UnaryExpr>(UnaryOp::BitNot, std::move(operand));
         expr->range = {startLoc, expr->operand->range.end};
         return expr;
     }
