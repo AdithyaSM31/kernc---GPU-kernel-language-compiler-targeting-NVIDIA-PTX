@@ -22,6 +22,7 @@ static bool returnsOnAllPaths(const Stmt& stmt) {
 }
 
 static bool isReservedBuiltinName(std::string_view name) {
+    if (getWarpIntrinsic(name).has_value()) return true;
     return name == "thread_idx"   || name == "threadIdx"   ||
            name == "thread_idx_x" || name == "thread_idx_y" || name == "thread_idx_z" ||
            name == "block_idx"    || name == "blockIdx"    ||
@@ -36,6 +37,11 @@ bool Sema::checkProgram(Program& program) {
     functions_.clear();
     bool ok = true;
     for (auto& func : program.functions) {
+        if (getWarpIntrinsic(func->name)) {
+            diag_.error(func->range.begin, "cannot redefine intrinsic '" + func->name + "' as a " +
+                        (func->isKernel ? "kernel" : "function"));
+            ok = false;
+        }
         auto it = functions_.find(func->name);
         if (it != functions_.end()) {
             diag_.error(func->range.begin, "redefinition of function '" + func->name + "'");
@@ -379,6 +385,70 @@ Type Sema::checkExpr(Expr& expr) {
 }
 
 Type Sema::checkCallExpr(CallExpr& expr, bool isExprStmt) {
+    if (auto intrin = getWarpIntrinsic(expr.callee)) {
+        switch (*intrin) {
+            case WarpIntrinsic::Activemask: {
+                if (expr.args.size() != 0) {
+                    diag_.error(expr.range.begin, "intrinsic '" + expr.callee + "' expects 0 argument(s), got " +
+                                std::to_string(expr.args.size()));
+                    for (auto& a : expr.args) checkExpr(*a);
+                }
+                expr.resolvedType = Type::makeInt();
+                return expr.resolvedType;
+            }
+            case WarpIntrinsic::BallotSync: {
+                if (expr.args.size() != 2) {
+                    diag_.error(expr.range.begin, "intrinsic '" + expr.callee + "' expects 2 argument(s), got " +
+                                std::to_string(expr.args.size()));
+                    for (auto& a : expr.args) checkExpr(*a);
+                    expr.resolvedType = Type::makeInt();
+                    return expr.resolvedType;
+                }
+                Type maskTy = checkExpr(*expr.args[0]);
+                if (!maskTy.isVoid() && !maskTy.isInt()) {
+                    diag_.error(expr.args[0]->range.begin, "argument 1 ('mask') of '" + expr.callee +
+                                "' must be 'int', got '" + maskTy.toString() + "'");
+                }
+                Type predTy = checkExpr(*expr.args[1]);
+                if (!predTy.isVoid() && !predTy.isBool() && !predTy.isInt()) {
+                    diag_.error(expr.args[1]->range.begin, "argument 2 ('predicate') of '" + expr.callee +
+                                "' must be 'bool' or 'int', got '" + predTy.toString() + "'");
+                }
+                expr.resolvedType = Type::makeInt();
+                return expr.resolvedType;
+            }
+            case WarpIntrinsic::ShflSync:
+            case WarpIntrinsic::ShflDownSync:
+            case WarpIntrinsic::ShflUpSync:
+            case WarpIntrinsic::ShflXorSync: {
+                if (expr.args.size() != 3) {
+                    diag_.error(expr.range.begin, "intrinsic '" + expr.callee + "' expects 3 argument(s), got " +
+                                std::to_string(expr.args.size()));
+                    for (auto& a : expr.args) checkExpr(*a);
+                    expr.resolvedType = Type::makeInt();
+                    return expr.resolvedType;
+                }
+                Type maskTy = checkExpr(*expr.args[0]);
+                if (!maskTy.isVoid() && !maskTy.isInt()) {
+                    diag_.error(expr.args[0]->range.begin, "argument 1 ('mask') of '" + expr.callee +
+                                "' must be 'int', got '" + maskTy.toString() + "'");
+                }
+                Type valTy = checkExpr(*expr.args[1]);
+                if (!valTy.isVoid() && !valTy.isInt() && !valTy.isFloat()) {
+                    diag_.error(expr.args[1]->range.begin, "argument 2 ('val') of '" + expr.callee +
+                                "' must be 'int' or 'float', got '" + valTy.toString() + "'");
+                }
+                Type arg3Ty = checkExpr(*expr.args[2]);
+                if (!arg3Ty.isVoid() && !arg3Ty.isInt()) {
+                    diag_.error(expr.args[2]->range.begin, "argument 3 of '" + expr.callee +
+                                "' must be 'int', got '" + arg3Ty.toString() + "'");
+                }
+                expr.resolvedType = valTy.isFloat() ? Type::makeFloat() : Type::makeInt();
+                return expr.resolvedType;
+            }
+        }
+    }
+
     auto it = functions_.find(expr.callee);
     if (it == functions_.end()) {
         diag_.error(expr.range.begin, "call to undeclared function '" + expr.callee + "'");

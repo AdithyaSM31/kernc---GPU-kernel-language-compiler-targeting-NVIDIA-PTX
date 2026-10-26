@@ -555,3 +555,70 @@ TEST(IRPassTest, FoldBitwiseOperations) {
     EXPECT_EQ(v[5], -4);
 }
 
+TEST(IRPassTest, WarpIntrinsicsIROpsAndPTX) {
+    std::string src = "kernel test_warp(int* out_i, float* out_f, int* in_i, float* in_f) {\n"
+                      "    int m = __activemask();\n"
+                      "    int vi = in_i[thread_idx];\n"
+                      "    float vf = in_f[thread_idx];\n"
+                      "    out_i[0] = __shfl_sync(m, vi, 3);\n"
+                      "    out_f[0] = __shfl_sync(m, vf, 3);\n"
+                      "    out_i[1] = __shfl_down_sync(m, vi, 4);\n"
+                      "    out_f[1] = __shfl_down_sync(m, vf, 4);\n"
+                      "    out_i[2] = __shfl_up_sync(m, vi, 2);\n"
+                      "    out_f[2] = __shfl_up_sync(m, vf, 2);\n"
+                      "    out_i[3] = __shfl_xor_sync(m, vi, 1);\n"
+                      "    out_f[3] = __shfl_xor_sync(m, vf, 1);\n"
+                      "    out_i[4] = __ballot_sync(m, vi > 0);\n"
+                      "}\n";
+    auto fn = compileToIR(src);
+    PTXEmitter emitter;
+    std::string ptx = emitter.emitFunction(fn);
+
+    EXPECT_NE(ptx.find("activemask.b32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("shfl.sync.idx.b32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("shfl.sync.down.b32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("shfl.sync.up.b32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("shfl.sync.bfly.b32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("vote.sync.ballot.b32"), std::string::npos) << ptx;
+
+    // Verify clamp operands
+    EXPECT_NE(ptx.find(", 31, "), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find(", 0, "), std::string::npos) << ptx;
+}
+
+TEST(IRPassTest, WarpIntrinsicsNotPrunedByDCE) {
+    std::string src = "kernel test_warp_dce(int val) {\n"
+                      "    int m = __activemask();\n"
+                      "    __shfl_down_sync(m, val, 1);\n"
+                      "}\n";
+    auto fn = compileToIR(src);
+    EXPECT_EQ(countOps(fn, IROp::ShflDown), 1);
+    Optimizer::runPasses(fn);
+    EXPECT_EQ(countOps(fn, IROp::ShflDown), 1) << "shfl.sync.down must not be pruned by DCE due to warp synchronization semantics!";
+}
+
+TEST(IRPassTest, ActivemaskPrunedByDCEWhenUnused) {
+    std::string src = "kernel test_act_dead(int* out, int x) {\n"
+                      "    int m = __activemask();\n"
+                      "    out[0] = x;\n"
+                      "}\n";
+    auto fn = compileToIR(src);
+    EXPECT_EQ(countOps(fn, IROp::Activemask), 1);
+    Optimizer::runPasses(fn);
+    EXPECT_EQ(countOps(fn, IROp::Activemask), 0) << "activemask is pure and should be pruned by DCE when unused";
+}
+
+TEST(IRPassTest, BallotSyncWithIntPredicateEmitsSetpNe) {
+    std::string src = "kernel test_ballot_int(int* out, int pred_val) {\n"
+                      "    int m = __activemask();\n"
+                      "    out[0] = __ballot_sync(m, pred_val);\n"
+                      "}\n";
+    auto fn = compileToIR(src);
+    PTXEmitter emitter;
+    std::string ptx = emitter.emitFunction(fn);
+    EXPECT_NE(ptx.find("setp.ne.s32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("vote.sync.ballot.b32"), std::string::npos) << ptx;
+}
+
+
+

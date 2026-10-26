@@ -2,7 +2,9 @@
 
 #include "kernc/SourceLocation.h"
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace kernc {
@@ -184,7 +186,26 @@ struct CastExpr : public Expr {
     }
 };
 
-// `f(a, b)`: a call to a device function (`func`), lowered to a PTX `call`.
+enum class WarpIntrinsic {
+    ShflSync,
+    ShflDownSync,
+    ShflUpSync,
+    ShflXorSync,
+    BallotSync,
+    Activemask
+};
+
+inline std::optional<WarpIntrinsic> getWarpIntrinsic(std::string_view name) {
+    if (name == "shfl_sync" || name == "__shfl_sync") return WarpIntrinsic::ShflSync;
+    if (name == "shfl_down_sync" || name == "__shfl_down_sync") return WarpIntrinsic::ShflDownSync;
+    if (name == "shfl_up_sync" || name == "__shfl_up_sync") return WarpIntrinsic::ShflUpSync;
+    if (name == "shfl_xor_sync" || name == "__shfl_xor_sync") return WarpIntrinsic::ShflXorSync;
+    if (name == "ballot_sync" || name == "__ballot_sync") return WarpIntrinsic::BallotSync;
+    if (name == "activemask" || name == "__activemask") return WarpIntrinsic::Activemask;
+    return std::nullopt;
+}
+
+// `f(a, b)`: a call to a device function (`func`) or warp intrinsic, lowered to PTX.
 struct CallExpr : public Expr {
     std::string callee;
     std::vector<std::unique_ptr<Expr>> args;

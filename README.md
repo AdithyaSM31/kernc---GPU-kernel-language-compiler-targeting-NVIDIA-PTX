@@ -22,6 +22,7 @@ What it supports:
 
 - `int`, `float` and `bool`; `int*` / `float*` parameters; `shared` arrays
 - 1D, 2D, and 3D execution geometry (`thread_idx[_x|_y|_z]`, `block_idx_*`, `block_dim_*`, `grid_dim_*`, or `.x/.y/.z`)
+- warp-level intrinsics (`shfl_sync`, `shfl_down_sync`, `shfl_up_sync`, `shfl_xor_sync`, `ballot_sync`, `activemask`, with and without `__`)
 - device functions (`func`), including recursion and mutual recursion
 - `if` / `else`, `while`, `for`, `return`, `barrier()`
 - short-circuit `&&` / `||`, in conditions and as values
@@ -31,7 +32,7 @@ What it supports:
 - `.file` / `.loc` source line info with `-lineinfo`
 - diagnostics with `file:line:column` and a caret
 
-The suite has 118 tests, and all of them pass, both in a normal build and under
+The suite has 129 tests, and all of them pass, both in a normal build and under
 UndefinedBehaviorSanitizer.
 
 ---
@@ -106,6 +107,7 @@ The full reference is in [docs/specs/01-scope.md](docs/specs/01-scope.md).
 |---|---|
 | Types | `int` (`.s32`), `float` (`.f32`), `bool` (`.pred`); `int*` / `float*` as parameters |
 | Built-ins | `thread_idx[_x\|_y\|_z]`, `block_idx_*`, `block_dim_*`, `grid_dim_*` (or `.x`, `.y`, `.z` / `threadIdx`, etc.) |
+| Intrinsics | `shfl_sync`, `shfl_down_sync`, `shfl_up_sync`, `shfl_xor_sync`, `ballot_sync`, `activemask` (with and without `__`) |
 | Statements | declarations, assignment, `if`/`else`, `while`, `for`, `return`, `barrier();`, `shared T name[N];`, function calls |
 | Operators | `+ - * / %`, unary `- ! ~`, `& \| ^ << >>`, `< <= > >= == !=`, `&&` `\|\|` (short-circuit), `p[i]` |
 | Casts | `cast<int>(x)`, `cast<float>(x)`, `cast<bool>(x)` |
@@ -339,11 +341,11 @@ produce PTX that ptxas rejected. nvcc keeps its own labels apart the same way (`
 
 | Suite | Count | What it checks |
 |---|---|---|
-| Unit tests (GoogleTest) | 59 | Lexer 7, parser 10, Sema 18 (accept and reject cases, many checking `line:col`), IR and PTX 24 |
-| GPU end-to-end (Driver API) | 19 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
+| Unit tests (GoogleTest) | 79 | Lexer 9, parser 14, Sema 27 (accept/reject, type/arity rules, diagnostic locations), IR and PTX 29 |
+| GPU end-to-end (Driver API) | 22 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
 | Diagnostics | 1 suite, 8 files | `tests/diagnostic/err_*.kern` must fail with the expected message (and location, where given) |
 | ptxas acceptance | 6 | Every file in `examples/` assembles with `ptxas -arch=sm_86` |
-| ptxas regression | 12 | `tests/regress/*.kern` (6 kernels) assemble at both `-O0` and `-O1` |
+| ptxas regression | 18 | `tests/regress/*.kern` (9 kernels) assemble at both `-O0` and `-O1` |
 | Line tables | 2 | `kernc -lineinfo` → ptxas → `nvdisasm --print-line-info`; each `//@ REGEX` line must own matching SASS |
 | Runner CLI e2e | 1 suite, 20 stages | `kernc-runner` driver invocation, argument marshaling, device execution and error validation |
 
@@ -355,6 +357,7 @@ The GPU tests cover:
 - 13 kinds of `bool` expression, with NaN and `-0.0` inputs;
 - a block reverse through shared memory;
 - the shipped reduction example, for 1 to 2²⁰+3 elements;
+- warp-level tree reduction (`__shfl_down_sync` / `shfl_down_sync` with offsets 16, 8, 4, 2, 1), butterfly exchange (`__shfl_xor_sync` / `shfl_xor_sync`), broadcast (`__shfl_sync` / `shfl_sync`), warp ballot (`__ballot_sync` bool predicate, `ballot_sync` int predicate), active mask (`__activemask` / `activemask`), and shift up (`__shfl_up_sync` / `shfl_up_sync`) for `int` and `float` at `-O0` and `-O1` vs CPU reference;
 - device functions (`examples/functions.kern`), with recursion, mutual recursion, float, bool, pointer and void calls at `-O0` and `-O1`;
 - functions and arrays named like kernc's old generated PTX names (`entry`, `L_then_0`,
   `f_retval`, `param0`, `k_buf`, …), which must compile and call the right function;
@@ -371,6 +374,7 @@ Two techniques do most of the work:
 - **Mutation checks.** After each fix, I reverted it on purpose to confirm a test fails:
   - the old float-to-int fold fails the differential test;
   - `setp.ne` instead of `setp.neu` fails the NaN case;
+  - `shfl.sync.up` instead of `shfl.sync.down` fails the warp tree reduction test;
   - removing `bar.sync` fails the block-reverse test, first at thread 64, the first thread of
     the third warp, which read data before its partner warp had written it;
   - removing statement locations fails all six line-table checks;

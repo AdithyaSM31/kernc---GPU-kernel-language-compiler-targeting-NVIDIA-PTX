@@ -1179,6 +1179,207 @@ TEST_F(KernelE2ETest, MultiDimensionalExecutionMatchesCpu) {
     }
 }
 
+TEST_F(KernelE2ETest, WarpIntrinsicsMatchCpu) {
+    std::string src = 
+        "kernel test_warp_intrinsics(\n"
+        "    int* in_i, float* in_f,\n"
+        "    int* out_reduce_i, float* out_reduce_f,\n"
+        "    int* out_xor_i, float* out_xor_f,\n"
+        "    int* out_bcast_i, float* out_bcast_f,\n"
+        "    int* out_ballot_i, int* out_ballot_int_i,\n"
+        "    int* out_activemask_i, int* out_activemask2_i,\n"
+        "    int* out_up_i, float* out_up_f\n"
+        ") {\n"
+        "    int tid = thread_idx;\n"
+        "    int mask = __activemask();\n"
+        "    int mask2 = activemask();\n"
+        "    out_activemask_i[tid] = mask;\n"
+        "    out_activemask2_i[tid] = mask2;\n"
+        "\n"
+        "    // Int tree reduction (__shfl_down_sync)\n"
+        "    int vali = in_i[tid];\n"
+        "    vali = vali + __shfl_down_sync(mask, vali, 16);\n"
+        "    vali = vali + __shfl_down_sync(mask, vali, 8);\n"
+        "    vali = vali + __shfl_down_sync(mask, vali, 4);\n"
+        "    vali = vali + __shfl_down_sync(mask, vali, 2);\n"
+        "    vali = vali + __shfl_down_sync(mask, vali, 1);\n"
+        "    out_reduce_i[tid] = vali;\n"
+        "\n"
+        "    // Float tree reduction (shfl_down_sync, unprefixed)\n"
+        "    float valf = in_f[tid];\n"
+        "    valf = valf + shfl_down_sync(mask, valf, 16);\n"
+        "    valf = valf + shfl_down_sync(mask, valf, 8);\n"
+        "    valf = valf + shfl_down_sync(mask, valf, 4);\n"
+        "    valf = valf + shfl_down_sync(mask, valf, 2);\n"
+        "    valf = valf + shfl_down_sync(mask, valf, 1);\n"
+        "    out_reduce_f[tid] = valf;\n"
+        "\n"
+        "    // Butterfly exchange (XOR) with delta 16 (int and float)\n"
+        "    out_xor_i[tid] = __shfl_xor_sync(mask, in_i[tid], 16);\n"
+        "    out_xor_f[tid] = shfl_xor_sync(mask2, in_f[tid], 16);\n"
+        "\n"
+        "    // Broadcast from lane 7 (int and float)\n"
+        "    out_bcast_i[tid] = __shfl_sync(mask, in_i[tid], 7);\n"
+        "    out_bcast_f[tid] = shfl_sync(mask2, in_f[tid], 7);\n"
+        "\n"
+        "    // Ballot: bool predicate (tid >= 16) and int predicate (in_i[tid] % 2)\n"
+        "    out_ballot_i[tid] = __ballot_sync(mask, tid >= 16);\n"
+        "    out_ballot_int_i[tid] = ballot_sync(mask2, in_i[tid] % 2);\n"
+        "\n"
+        "    // Shift up with delta 3 (int and float)\n"
+        "    out_up_i[tid] = __shfl_up_sync(mask, in_i[tid], 3);\n"
+        "    out_up_f[tid] = shfl_up_sync(mask2, in_f[tid], 3);\n"
+        "}\n";
+
+    constexpr int kWarpSize = 32;
+    std::vector<int32_t> h_in_i(kWarpSize);
+    std::vector<float> h_in_f(kWarpSize);
+    int32_t expected_sum_i = 0;
+    float expected_sum_f = 0.0f;
+
+    for (int i = 0; i < kWarpSize; ++i) {
+        h_in_i[i] = i + 1;
+        h_in_f[i] = (i + 1) * 0.5f;
+        expected_sum_i += h_in_i[i];
+        expected_sum_f += h_in_f[i];
+    }
+
+    for (bool optimize : {false, true}) {
+        std::string optName = optimize ? "-O1" : "-O0";
+        std::string ptx = compileSourceToPTX(src, optimize);
+        ASSERT_FALSE(ptx.empty()) << optName;
+
+        CUmodule mod = loadPTX(ptx);
+        ASSERT_NE(mod, nullptr) << optName;
+
+        CUfunction func;
+        CHECK_CUDA(cuModuleGetFunction(&func, mod, "test_warp_intrinsics"));
+
+        CUdeviceptr d_in_i, d_in_f;
+        CUdeviceptr d_out_reduce_i, d_out_reduce_f;
+        CUdeviceptr d_out_xor_i, d_out_xor_f;
+        CUdeviceptr d_out_bcast_i, d_out_bcast_f;
+        CUdeviceptr d_out_ballot_i, d_out_ballot_int_i;
+        CUdeviceptr d_out_activemask_i, d_out_activemask2_i;
+        CUdeviceptr d_out_up_i, d_out_up_f;
+
+        size_t sizeBytesI = kWarpSize * sizeof(int32_t);
+        size_t sizeBytesF = kWarpSize * sizeof(float);
+
+        CHECK_CUDA(cuMemAlloc(&d_in_i, sizeBytesI));
+        CHECK_CUDA(cuMemAlloc(&d_in_f, sizeBytesF));
+        CHECK_CUDA(cuMemAlloc(&d_out_reduce_i, sizeBytesI));
+        CHECK_CUDA(cuMemAlloc(&d_out_reduce_f, sizeBytesF));
+        CHECK_CUDA(cuMemAlloc(&d_out_xor_i, sizeBytesI));
+        CHECK_CUDA(cuMemAlloc(&d_out_xor_f, sizeBytesF));
+        CHECK_CUDA(cuMemAlloc(&d_out_bcast_i, sizeBytesI));
+        CHECK_CUDA(cuMemAlloc(&d_out_bcast_f, sizeBytesF));
+        CHECK_CUDA(cuMemAlloc(&d_out_ballot_i, sizeBytesI));
+        CHECK_CUDA(cuMemAlloc(&d_out_ballot_int_i, sizeBytesI));
+        CHECK_CUDA(cuMemAlloc(&d_out_activemask_i, sizeBytesI));
+        CHECK_CUDA(cuMemAlloc(&d_out_activemask2_i, sizeBytesI));
+        CHECK_CUDA(cuMemAlloc(&d_out_up_i, sizeBytesI));
+        CHECK_CUDA(cuMemAlloc(&d_out_up_f, sizeBytesF));
+
+        CHECK_CUDA(cuMemcpyHtoD(d_in_i, h_in_i.data(), sizeBytesI));
+        CHECK_CUDA(cuMemcpyHtoD(d_in_f, h_in_f.data(), sizeBytesF));
+
+        void* args[] = {
+            &d_in_i, &d_in_f,
+            &d_out_reduce_i, &d_out_reduce_f,
+            &d_out_xor_i, &d_out_xor_f,
+            &d_out_bcast_i, &d_out_bcast_f,
+            &d_out_ballot_i, &d_out_ballot_int_i,
+            &d_out_activemask_i, &d_out_activemask2_i,
+            &d_out_up_i, &d_out_up_f
+        };
+
+        CHECK_CUDA(cuLaunchKernel(func, 1, 1, 1, kWarpSize, 1, 1, 0, 0, args, 0));
+        CHECK_CUDA(cuCtxSynchronize());
+
+        std::vector<int32_t> h_out_reduce_i(kWarpSize, 0);
+        std::vector<float> h_out_reduce_f(kWarpSize, 0.0f);
+        std::vector<int32_t> h_out_xor_i(kWarpSize, 0);
+        std::vector<float> h_out_xor_f(kWarpSize, 0.0f);
+        std::vector<int32_t> h_out_bcast_i(kWarpSize, 0);
+        std::vector<float> h_out_bcast_f(kWarpSize, 0.0f);
+        std::vector<int32_t> h_out_ballot_i(kWarpSize, 0);
+        std::vector<int32_t> h_out_ballot_int_i(kWarpSize, 0);
+        std::vector<int32_t> h_out_activemask_i(kWarpSize, 0);
+        std::vector<int32_t> h_out_activemask2_i(kWarpSize, 0);
+        std::vector<int32_t> h_out_up_i(kWarpSize, 0);
+        std::vector<float> h_out_up_f(kWarpSize, 0.0f);
+
+        CHECK_CUDA(cuMemcpyDtoH(h_out_reduce_i.data(), d_out_reduce_i, sizeBytesI));
+        CHECK_CUDA(cuMemcpyDtoH(h_out_reduce_f.data(), d_out_reduce_f, sizeBytesF));
+        CHECK_CUDA(cuMemcpyDtoH(h_out_xor_i.data(), d_out_xor_i, sizeBytesI));
+        CHECK_CUDA(cuMemcpyDtoH(h_out_xor_f.data(), d_out_xor_f, sizeBytesF));
+        CHECK_CUDA(cuMemcpyDtoH(h_out_bcast_i.data(), d_out_bcast_i, sizeBytesI));
+        CHECK_CUDA(cuMemcpyDtoH(h_out_bcast_f.data(), d_out_bcast_f, sizeBytesF));
+        CHECK_CUDA(cuMemcpyDtoH(h_out_ballot_i.data(), d_out_ballot_i, sizeBytesI));
+        CHECK_CUDA(cuMemcpyDtoH(h_out_ballot_int_i.data(), d_out_ballot_int_i, sizeBytesI));
+        CHECK_CUDA(cuMemcpyDtoH(h_out_activemask_i.data(), d_out_activemask_i, sizeBytesI));
+        CHECK_CUDA(cuMemcpyDtoH(h_out_activemask2_i.data(), d_out_activemask2_i, sizeBytesI));
+        CHECK_CUDA(cuMemcpyDtoH(h_out_up_i.data(), d_out_up_i, sizeBytesI));
+        CHECK_CUDA(cuMemcpyDtoH(h_out_up_f.data(), d_out_up_f, sizeBytesF));
+
+        // 1. activemask (__ and unprefixed): all 32 lanes active in warp -> 0xFFFFFFFF (-1)
+        for (int i = 0; i < kWarpSize; ++i) {
+            EXPECT_EQ(h_out_activemask_i[i], -1) << optName << " activemask lane " << i;
+            EXPECT_EQ(h_out_activemask2_i[i], -1) << optName << " activemask2 lane " << i;
+        }
+
+        // 2. Tree reduction via shfl_down_sync: lane 0 must contain full warp sum
+        EXPECT_EQ(h_out_reduce_i[0], expected_sum_i) << optName << " int reduction lane 0";
+        EXPECT_FLOAT_EQ(h_out_reduce_f[0], expected_sum_f) << optName << " float reduction lane 0";
+
+        // 3. Butterfly exchange via shfl_xor_sync: lane i gets lane (i ^ 16)
+        for (int i = 0; i < kWarpSize; ++i) {
+            EXPECT_EQ(h_out_xor_i[i], h_in_i[i ^ 16]) << optName << " xor int lane " << i;
+            EXPECT_FLOAT_EQ(h_out_xor_f[i], h_in_f[i ^ 16]) << optName << " xor float lane " << i;
+        }
+
+        // 4. Broadcast via shfl_sync: all lanes get lane 7
+        for (int i = 0; i < kWarpSize; ++i) {
+            EXPECT_EQ(h_out_bcast_i[i], h_in_i[7]) << optName << " broadcast int lane " << i;
+            EXPECT_FLOAT_EQ(h_out_bcast_f[i], h_in_f[7]) << optName << " broadcast float lane " << i;
+        }
+
+        // 5. Ballot via ballot_sync:
+        //    - Bool predicate (tid >= 16): bits 16..31 are 1 -> 0xFFFF0000
+        //    - Int predicate (in_i[tid] % 2): alternating bits 0, 2, 4, ... are 1 -> 0x55555555
+        for (int i = 0; i < kWarpSize; ++i) {
+            EXPECT_EQ(h_out_ballot_i[i], static_cast<int32_t>(0xFFFF0000)) << optName << " ballot bool lane " << i;
+            EXPECT_EQ(h_out_ballot_int_i[i], static_cast<int32_t>(0x55555555)) << optName << " ballot int lane " << i;
+        }
+
+        // 6. Shift up via shfl_up_sync: lane i gets lane i - 3 if i >= 3, else lane i
+        for (int i = 0; i < kWarpSize; ++i) {
+            int32_t expected_up_i = (i >= 3) ? h_in_i[i - 3] : h_in_i[i];
+            float expected_up_f = (i >= 3) ? h_in_f[i - 3] : h_in_f[i];
+            EXPECT_EQ(h_out_up_i[i], expected_up_i) << optName << " up int lane " << i;
+            EXPECT_FLOAT_EQ(h_out_up_f[i], expected_up_f) << optName << " up float lane " << i;
+        }
+
+        CHECK_CUDA(cuMemFree(d_in_i));
+        CHECK_CUDA(cuMemFree(d_in_f));
+        CHECK_CUDA(cuMemFree(d_out_reduce_i));
+        CHECK_CUDA(cuMemFree(d_out_reduce_f));
+        CHECK_CUDA(cuMemFree(d_out_xor_i));
+        CHECK_CUDA(cuMemFree(d_out_xor_f));
+        CHECK_CUDA(cuMemFree(d_out_bcast_i));
+        CHECK_CUDA(cuMemFree(d_out_bcast_f));
+        CHECK_CUDA(cuMemFree(d_out_ballot_i));
+        CHECK_CUDA(cuMemFree(d_out_ballot_int_i));
+        CHECK_CUDA(cuMemFree(d_out_activemask_i));
+        CHECK_CUDA(cuMemFree(d_out_activemask2_i));
+        CHECK_CUDA(cuMemFree(d_out_up_i));
+        CHECK_CUDA(cuMemFree(d_out_up_f));
+
+        CHECK_CUDA(cuModuleUnload(mod));
+    }
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     ::testing::AddGlobalTestEnvironment(new CudaEnvironment);

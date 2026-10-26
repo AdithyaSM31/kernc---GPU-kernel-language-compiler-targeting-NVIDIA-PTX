@@ -690,6 +690,53 @@ VReg IRGen::emitCastExpr(const CastExpr& expr, IRFunction& fn) {
 }
 
 VReg IRGen::emitCallExpr(const CallExpr& expr, IRFunction& fn) {
+    if (auto intrin = getWarpIntrinsic(expr.callee)) {
+        switch (*intrin) {
+            case WarpIntrinsic::Activemask: {
+                VReg dst = fn.freshReg(IRType::S32);
+                fn.emit(IRInst{IROp::Activemask, dst, 0, 0, IRType::S32});
+                return dst;
+            }
+            case WarpIntrinsic::BallotSync: {
+                VReg mask = emitExpr(*expr.args[0], fn);
+                VReg pred = emitAsPred(*expr.args[1], fn);
+                VReg dst = fn.freshReg(IRType::S32);
+                fn.emit(IRInst{IROp::VoteBallot, dst, pred, mask, IRType::S32});
+                return dst;
+            }
+            case WarpIntrinsic::ShflSync:
+            case WarpIntrinsic::ShflDownSync:
+            case WarpIntrinsic::ShflUpSync:
+            case WarpIntrinsic::ShflXorSync: {
+                VReg mask = emitExpr(*expr.args[0], fn);
+                VReg val = emitExpr(*expr.args[1], fn);
+                VReg b = emitExpr(*expr.args[2], fn);
+                IRType valIRType = expr.args[1]->resolvedType.isFloat() ? IRType::F32 : IRType::S32;
+                VReg dst = fn.freshReg(valIRType);
+
+                IROp op = IROp::ShflIdx;
+                int32_t clamp = 31;
+                if (*intrin == WarpIntrinsic::ShflDownSync) {
+                    op = IROp::ShflDown;
+                    clamp = 31;
+                } else if (*intrin == WarpIntrinsic::ShflUpSync) {
+                    op = IROp::ShflUp;
+                    clamp = 0;
+                } else if (*intrin == WarpIntrinsic::ShflXorSync) {
+                    op = IROp::ShflBfly;
+                    clamp = 31;
+                } else if (*intrin == WarpIntrinsic::ShflSync) {
+                    op = IROp::ShflIdx;
+                    clamp = 31;
+                }
+                IRInst inst{op, dst, val, b, mask, valIRType};
+                inst.immInt = clamp;
+                fn.emit(inst);
+                return dst;
+            }
+        }
+    }
+
     auto it = funcSignatures_.find(expr.callee);
     std::vector<VReg> argRegs;
     for (size_t i = 0; i < expr.args.size(); ++i) {

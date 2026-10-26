@@ -114,7 +114,7 @@ std::string PTXEmitter::emitFunction(const IRFunction& fn) {
     // from the type IRGen recorded when it was created, never from the instruction using it.
     for (const auto& bb : fn.blocks) {
         for (const auto& inst : bb.instructions) {
-            for (VReg reg : {inst.dst, inst.src1, inst.src2}) {
+            for (VReg reg : {inst.dst, inst.src1, inst.src2, inst.src3}) {
                 if (reg != 0) {
                     alloc.getOrAlloc(reg, fn.regType(reg));
                 }
@@ -182,6 +182,7 @@ std::string PTXEmitter::emitFunction(const IRFunction& fn) {
             std::string dst = alloc.get(inst.dst);
             std::string s1 = alloc.get(inst.src1);
             std::string s2 = alloc.get(inst.src2);
+            std::string s3 = alloc.get(inst.src3);
 
             switch (inst.op) {
                 // Integer Arithmetic
@@ -425,6 +426,26 @@ std::string PTXEmitter::emitFunction(const IRFunction& fn) {
                     break;
                 case IROp::Bar:
                     ss << "    bar.sync 0;\n";
+                    break;
+
+                // Warp-Level Intrinsics
+                case IROp::ShflIdx:
+                    ss << "    shfl.sync.idx.b32 " << dst << ", " << s1 << ", " << s2 << ", " << inst.immInt << ", " << s3 << ";\n";
+                    break;
+                case IROp::ShflDown:
+                    ss << "    shfl.sync.down.b32 " << dst << ", " << s1 << ", " << s2 << ", " << inst.immInt << ", " << s3 << ";\n";
+                    break;
+                case IROp::ShflUp:
+                    ss << "    shfl.sync.up.b32 " << dst << ", " << s1 << ", " << s2 << ", " << inst.immInt << ", " << s3 << ";\n";
+                    break;
+                case IROp::ShflBfly:
+                    ss << "    shfl.sync.bfly.b32 " << dst << ", " << s1 << ", " << s2 << ", " << inst.immInt << ", " << s3 << ";\n";
+                    break;
+                case IROp::VoteBallot:
+                    ss << "    vote.sync.ballot.b32 " << dst << ", " << s1 << ", " << s2 << ";\n";
+                    break;
+                case IROp::Activemask:
+                    ss << "    activemask.b32 " << dst << ";\n";
                     break;
             }
         }

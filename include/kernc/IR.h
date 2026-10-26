@@ -81,7 +81,15 @@ enum class IROp {
 
     // GPU Specific
     ReadSReg,
-    Bar
+    Bar,
+
+    // Warp-Level Intrinsics
+    ShflIdx,
+    ShflDown,
+    ShflUp,
+    ShflBfly,
+    VoteBallot,
+    Activemask
 };
 
 const char* irOpToString(IROp op);
@@ -91,6 +99,7 @@ struct IRInst {
     VReg dst = 0;
     VReg src1 = 0;
     VReg src2 = 0;
+    VReg src3 = 0;
     IRType type = IRType::S32;
 
     int32_t immInt = 0;
@@ -112,6 +121,14 @@ struct IRInst {
     IRInst() = default;
     IRInst(IROp o, VReg d = 0, VReg s1 = 0, VReg s2 = 0, IRType t = IRType::S32)
         : op(o), dst(d), src1(s1), src2(s2), type(t) {}
+    IRInst(IROp o, VReg d, VReg s1, VReg s2, VReg s3, IRType t)
+        : op(o), dst(d), src1(s1), src2(s2), src3(s3), type(t) {
+        if (o == IROp::ShflIdx || o == IROp::ShflDown || o == IROp::ShflBfly) {
+            immInt = 31;
+        } else if (o == IROp::ShflUp) {
+            immInt = 0;
+        }
+    }
 
     std::string toString() const;
 };

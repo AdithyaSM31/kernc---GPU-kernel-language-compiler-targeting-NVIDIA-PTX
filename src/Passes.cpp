@@ -452,6 +452,7 @@ bool Optimizer::runDeadCodeElimination(IRFunction& fn) {
             for (const auto& inst : bb.instructions) {
                 if (inst.src1 != 0) useCount[inst.src1]++;
                 if (inst.src2 != 0) useCount[inst.src2]++;
+                if (inst.src3 != 0) useCount[inst.src3]++;
                 for (VReg arg : inst.args) {
                     if (arg != 0) useCount[arg]++;
                 }
@@ -464,7 +465,10 @@ bool Optimizer::runDeadCodeElimination(IRFunction& fn) {
                 if (it->op == IROp::Store || it->op == IROp::Bra ||
                     it->op == IROp::BraCond || it->op == IROp::Ret ||
                     it->op == IROp::Bar || it->op == IROp::Call ||
-                    it->op == IROp::StoreRetval) {
+                    it->op == IROp::StoreRetval ||
+                    it->op == IROp::ShflIdx || it->op == IROp::ShflDown ||
+                    it->op == IROp::ShflUp || it->op == IROp::ShflBfly ||
+                    it->op == IROp::VoteBallot) {
                     ++it;
                     continue;
                 }

@@ -67,6 +67,12 @@ const char* irOpToString(IROp op) {
         case IROp::StoreRetval: return "st.retval";
         case IROp::ReadSReg:   return "readsreg";
         case IROp::Bar:        return "bar.sync";
+        case IROp::ShflIdx:    return "shfl.sync.idx";
+        case IROp::ShflDown:   return "shfl.sync.down";
+        case IROp::ShflUp:     return "shfl.sync.up";
+        case IROp::ShflBfly:   return "shfl.sync.bfly";
+        case IROp::VoteBallot: return "vote.sync.ballot";
+        case IROp::Activemask: return "activemask";
     }
     return "??";
 }
@@ -110,6 +116,17 @@ std::string IRInst::toString() const {
             break;
         case IROp::StoreRetval:
             ss << "%v" << src1;
+            break;
+        case IROp::ShflIdx:
+        case IROp::ShflDown:
+        case IROp::ShflBfly:
+        case IROp::ShflUp:
+            ss << "%v" << src1 << ", %v" << src2 << ", " << immInt << ", %v" << src3;
+            break;
+        case IROp::VoteBallot:
+            ss << "%v" << src1 << ", %v" << src2;
+            break;
+        case IROp::Activemask:
             break;
         case IROp::Neg:
         case IROp::FNeg:

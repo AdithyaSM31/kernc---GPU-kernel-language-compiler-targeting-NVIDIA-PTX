@@ -83,3 +83,22 @@ All built-in identifiers evaluate to 32-bit signed integer values (`int`). Their
   - Parameters: `int`, `float`, `bool`, `int*`, `float*`. Unlike kernels, `bool` parameters are permitted (passed across the ABI as 32-bit values). Pointer parameters receive already-converted global addresses.
   - Shared memory: `shared` arrays cannot be declared in device functions (they are block-scope and only allowed in kernels).
   - Calling: Calls can appear as expressions or expression statements (for void or discarded returns). Forward calls and recursion / mutual recursion are supported; signatures are collected in an initial pass and prototypes are emitted ahead of definitions.
+
+### Warp-Level Intrinsics
+`kernc` provides warp-level communication and synchronization primitives allowing threads within a 32-lane warp to exchange data and vote without accessing shared or global memory. All intrinsics are available both with and without the `__` prefix:
+- `__shfl_sync(mask, val, src_lane)` / `shfl_sync(...)`: broadcast from lane `src_lane` -> `shfl.sync.idx.b32 d, a, b, 31, member_mask;`
+- `__shfl_down_sync(mask, val, delta)` / `shfl_down_sync(...)`: shift down by `delta` lanes -> `shfl.sync.down.b32 d, a, b, 31, member_mask;`
+- `__shfl_up_sync(mask, val, delta)` / `shfl_up_sync(...)`: shift up by `delta` lanes -> `shfl.sync.up.b32 d, a, b, 0, member_mask;`
+- `__shfl_xor_sync(mask, val, lane_mask)` / `shfl_xor_sync(...)`: butterfly exchange -> `shfl.sync.bfly.b32 d, a, b, 31, member_mask;`
+- `__ballot_sync(mask, predicate)` / `ballot_sync(...)`: 32-bit warp ballot -> `vote.sync.ballot.b32 d, pred, member_mask;`
+- `__activemask()` / `activemask()`: returns 32-bit active lane mask -> `activemask.b32 d;`
+
+Type rules in `Sema`:
+- `mask`: `int` (32-bit member mask).
+- `val`: `int` or `float` (return type matches `val`).
+- `delta` / `src_lane` / `lane_mask`: `int`.
+- `predicate`: `bool` or `int` (evaluated/converted to `.pred`).
+- `activemask`: 0 arguments, returns `int`.
+- Pointer types and `bool` values as shuffle payloads are rejected with compile-time diagnostics.
+- Intrinsic names are reserved identifiers and cannot be redefined as functions or shadowed by variables.
+

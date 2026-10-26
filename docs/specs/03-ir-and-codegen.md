@@ -139,3 +139,23 @@ The IR is a non-SSA 3-address virtual-register code organized into Basic Blocks 
       - `%tid` and `%ctaid` map to hardware special registers read by the `S2R` (Special Register to Register) instruction (e.g. `S2R R0, SR_TID.X`, `SR_CTAID.Y`).
       - `%ntid` and `%nctaid` represent kernel launch metadata passed via Driver API launch parameters; `ptxas` resolves them from Constant Memory Bank 0 (`c[0x0]`) or uniform registers without consuming special register file capacity.
     - `kernc-runner` accepts multi-dimensional geometry syntax (`--grid 4x4`, `--grid 2,3,4`, `--block 16x16`, `--block 4,2,2`), launching via `cuLaunchKernel` across all 6 grid/block dimensions.
+
+12. **Warp-Level Intrinsics (Data Exchange & Synchronization)**:
+    - Intra-warp communication without shared memory via PTX `shfl.sync` and `vote.sync` instructions.
+    - IR Opcode mapping:
+      - `__shfl_sync` / `shfl_sync` -> `IROp::ShflIdx` -> `shfl.sync.idx.b32 dst, val, src_lane, 31, mask;`
+      - `__shfl_down_sync` / `shfl_down_sync` -> `IROp::ShflDown` -> `shfl.sync.down.b32 dst, val, delta, 31, mask;`
+      - `__shfl_up_sync` / `shfl_up_sync` -> `IROp::ShflUp` -> `shfl.sync.up.b32 dst, val, delta, 0, mask;`
+      - `__shfl_xor_sync` / `shfl_xor_sync` -> `IROp::ShflBfly` -> `shfl.sync.bfly.b32 dst, val, lane_mask, 31, mask;`
+      - `__ballot_sync` / `ballot_sync` -> `IROp::VoteBallot` -> `vote.sync.ballot.b32 dst, pred, mask;`
+      - `__activemask` / `activemask` -> `IROp::Activemask` -> `activemask.b32 dst;`
+    - Operand types and clamp values:
+      - `ptxas` on `sm_86` accepts both 32-bit integer (`.s32`) and 32-bit float (`.f32`) registers as operands to `shfl.sync.*.b32`.
+      - Clamp values match CUDA hardware semantics: clamp `31` for index, down, and butterfly shuffle (clamping upper bound to warp size - 1); clamp `0` for up shuffle (threads with source lane < 0 receive their own unmodified register value).
+      - Predicates passed to `vote.sync.ballot` are converted to `.pred` registers via `emitAsPred`.
+    - Optimization and Synchronization Semantics:
+      - `shfl.sync` and `vote.sync` are intra-warp synchronization instructions requiring all non-exited threads in `mask` to arrive before executing. Dead Code Elimination (DCE) explicitly classifies them as side-effecting operations to guarantee that unused shuffle results do not compromise warp synchronization convergence.
+      - In contrast, `activemask` is a pure query of the active thread mask with no cross-thread synchronization barrier; dead definitions of `activemask` are cleanly eliminated by DCE when its result register is unused.
+      - Register scanner in `PTXEmitter` and register use counter in `Passes` account for 3-input operands via `IRInst::src3`.
+      - Default clamps (31 for idx/down/bfly, 0 for up) are stored on `IRInst::immInt` upon instruction construction and emitted directly into PTX.
+

@@ -1,0 +1,58 @@
+// Regression test: warp-level intrinsics compiled at -O0 and -O1.
+// Exercises shfl_sync, shfl_down_sync, shfl_up_sync, shfl_xor_sync, ballot_sync, activemask
+// with both int and float values, with and without __ prefix.
+
+kernel test_regress_warp(int* out_i, float* out_f, int* in_i, float* in_f, int n) {
+    int i = block_idx * block_dim + thread_idx;
+    if (i < n) {
+        int mask = __activemask();
+        int mask2 = activemask();
+
+        int vi = in_i[i];
+        float vf = in_f[i];
+
+        // Broadcast (shfl.sync.idx.b32)
+        int bcast_i1 = __shfl_sync(mask, vi, 0);
+        int bcast_i2 = shfl_sync(mask2, vi, 15);
+        float bcast_f1 = __shfl_sync(mask, vf, 0);
+        float bcast_f2 = shfl_sync(mask2, vf, 31);
+
+        // Shift down (shfl.sync.down.b32)
+        int down_i1 = __shfl_down_sync(mask, vi, 16);
+        int down_i2 = shfl_down_sync(mask2, vi, 1);
+        float down_f1 = __shfl_down_sync(mask, vf, 8);
+        float down_f2 = shfl_down_sync(mask2, vf, 2);
+
+        // Shift up (shfl.sync.up.b32)
+        int up_i1 = __shfl_up_sync(mask, vi, 4);
+        int up_i2 = shfl_up_sync(mask2, vi, 1);
+        float up_f1 = __shfl_up_sync(mask, vf, 4);
+        float up_f2 = shfl_up_sync(mask2, vf, 1);
+
+        // Butterfly exchange (shfl.sync.bfly.b32)
+        int bfly_i1 = __shfl_xor_sync(mask, vi, 16);
+        int bfly_i2 = shfl_xor_sync(mask2, vi, 1);
+        float bfly_f1 = __shfl_xor_sync(mask, vf, 8);
+        float bfly_f2 = shfl_xor_sync(mask2, vf, 2);
+
+        // Warp ballot (vote.sync.ballot.b32)
+        int ballot_1 = __ballot_sync(mask, vi > 0);
+        int ballot_2 = ballot_sync(mask2, thread_idx >= 16);
+        int ballot_3 = ballot_sync(mask, vi);
+
+        out_i[i * 11 + 0] = bcast_i1 + bcast_i2;
+        out_i[i * 11 + 1] = down_i1 + down_i2;
+        out_i[i * 11 + 2] = up_i1 + up_i2;
+        out_i[i * 11 + 3] = bfly_i1 + bfly_i2;
+        out_i[i * 11 + 4] = ballot_1;
+        out_i[i * 11 + 5] = ballot_2;
+        out_i[i * 11 + 6] = ballot_3;
+        out_i[i * 11 + 7] = mask;
+        out_i[i * 11 + 8] = mask2;
+
+        out_f[i * 4 + 0] = bcast_f1 + bcast_f2;
+        out_f[i * 4 + 1] = down_f1 + down_f2;
+        out_f[i * 4 + 2] = up_f1 + up_f2;
+        out_f[i * 4 + 3] = bfly_f1 + bfly_f2;
+    }
+}

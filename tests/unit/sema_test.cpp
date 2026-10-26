@@ -345,3 +345,109 @@ TEST(SemaTest, MultiDimensionalBuiltinShadowingRejected) {
     EXPECT_FALSE(checkSource(src3, diag3));
     EXPECT_NE(diag3.formatAll().find("reserved builtin name"), std::string::npos);
 }
+
+TEST(SemaTest, WarpIntrinsicsAccepted) {
+    std::string src = "kernel test(int* out_i, float* out_f, int* in_i, float* in_f) {\n"
+                      "    int mask = __activemask();\n"
+                      "    int mask2 = activemask();\n"
+                      "    int val_i = in_i[thread_idx];\n"
+                      "    float val_f = in_f[thread_idx];\n"
+                      "    \n"
+                      "    out_i[0] = __shfl_sync(mask, val_i, 0);\n"
+                      "    out_i[1] = shfl_sync(mask, val_i, 0);\n"
+                      "    out_f[0] = __shfl_sync(mask, val_f, 0);\n"
+                      "    out_f[1] = shfl_sync(mask, val_f, 0);\n"
+                      "    \n"
+                      "    out_i[2] = __shfl_down_sync(mask, val_i, 16);\n"
+                      "    out_i[3] = shfl_down_sync(mask, val_i, 16);\n"
+                      "    out_f[2] = __shfl_down_sync(mask, val_f, 16);\n"
+                      "    out_f[3] = shfl_down_sync(mask, val_f, 16);\n"
+                      "    \n"
+                      "    out_i[4] = __shfl_up_sync(mask, val_i, 1);\n"
+                      "    out_i[5] = shfl_up_sync(mask, val_i, 1);\n"
+                      "    out_f[4] = __shfl_up_sync(mask, val_f, 1);\n"
+                      "    out_f[5] = shfl_up_sync(mask, val_f, 1);\n"
+                      "    \n"
+                      "    out_i[6] = __shfl_xor_sync(mask, val_i, 1);\n"
+                      "    out_i[7] = shfl_xor_sync(mask, val_i, 1);\n"
+                      "    out_f[6] = __shfl_xor_sync(mask, val_f, 1);\n"
+                      "    out_f[7] = shfl_xor_sync(mask, val_f, 1);\n"
+                      "    \n"
+                      "    out_i[8] = __ballot_sync(mask, thread_idx < 16);\n"
+                      "    out_i[9] = ballot_sync(mask, val_i);\n"
+                      "}\n";
+    DiagnosticsEngine diag;
+    bool ok = checkSource(src, diag);
+    EXPECT_TRUE(ok) << diag.formatAll();
+    EXPECT_FALSE(diag.hasErrors());
+}
+
+TEST(SemaTest, WarpIntrinsicsInvalidTypesRejected) {
+    struct TestCase {
+        std::string src;
+        std::string expectedErr;
+    };
+    std::vector<TestCase> cases = {
+        {"kernel k(int* p) { int x = __shfl_sync(p, 1, 0); }", "argument 1 ('mask') of '__shfl_sync' must be 'int', got 'int*'"},
+        {"kernel k(float m) { int x = __shfl_sync(m, 1, 0); }", "argument 1 ('mask') of '__shfl_sync' must be 'int', got 'float'"},
+        {"kernel k(int* p) { int x = __shfl_down_sync(-1, p, 1); }", "argument 2 ('val') of '__shfl_down_sync' must be 'int' or 'float', got 'int*'"},
+        {"kernel k() { int x = __shfl_down_sync(-1, true, 1); }", "argument 2 ('val') of '__shfl_down_sync' must be 'int' or 'float', got 'bool'"},
+        {"kernel k() { int x = __shfl_up_sync(-1, 1, 1.5); }", "argument 3 of '__shfl_up_sync' must be 'int', got 'float'"},
+        {"kernel k(int* p) { int x = __shfl_xor_sync(-1, 1, p); }", "argument 3 of '__shfl_xor_sync' must be 'int', got 'int*'"},
+        {"kernel k() { int x = __ballot_sync(-1, 1.5); }", "argument 2 ('predicate') of '__ballot_sync' must be 'bool' or 'int', got 'float'"},
+        {"kernel k(int* p) { int x = __ballot_sync(-1, p); }", "argument 2 ('predicate') of '__ballot_sync' must be 'bool' or 'int', got 'int*'"},
+        {"kernel k(int* p) { int x = __ballot_sync(p, 1); }", "argument 1 ('mask') of '__ballot_sync' must be 'int', got 'int*'"},
+    };
+
+    for (const auto& tc : cases) {
+        DiagnosticsEngine diag;
+        EXPECT_FALSE(checkSource(tc.src, diag)) << tc.src;
+        EXPECT_NE(diag.formatAll().find(tc.expectedErr), std::string::npos)
+            << "Expected: " << tc.expectedErr << "\nGot: " << diag.formatAll();
+    }
+}
+
+TEST(SemaTest, WarpIntrinsicsArityMismatchesRejected) {
+    struct TestCase {
+        std::string src;
+        std::string expectedErr;
+    };
+    std::vector<TestCase> cases = {
+        {"kernel k() { int x = __activemask(1); }", "intrinsic '__activemask' expects 0 argument(s), got 1"},
+        {"kernel k() { int x = activemask(1, 2); }", "intrinsic 'activemask' expects 0 argument(s), got 2"},
+        {"kernel k() { int x = __ballot_sync(-1); }", "intrinsic '__ballot_sync' expects 2 argument(s), got 1"},
+        {"kernel k() { int x = ballot_sync(-1, 1, 2); }", "intrinsic 'ballot_sync' expects 2 argument(s), got 3"},
+        {"kernel k() { int x = __shfl_sync(-1, 1); }", "intrinsic '__shfl_sync' expects 3 argument(s), got 2"},
+        {"kernel k() { int x = shfl_down_sync(-1, 1, 2, 3); }", "intrinsic 'shfl_down_sync' expects 3 argument(s), got 4"},
+    };
+
+    for (const auto& tc : cases) {
+        DiagnosticsEngine diag;
+        EXPECT_FALSE(checkSource(tc.src, diag)) << tc.src;
+        EXPECT_NE(diag.formatAll().find(tc.expectedErr), std::string::npos)
+            << "Expected: " << tc.expectedErr << "\nGot: " << diag.formatAll();
+    }
+}
+
+TEST(SemaTest, WarpIntrinsicsRedefinitionOrShadowingRejected) {
+    std::string src1 = "func int __shfl_sync(int a) { return a; }\nkernel k() {}\n";
+    DiagnosticsEngine diag1;
+    EXPECT_FALSE(checkSource(src1, diag1));
+    EXPECT_NE(diag1.formatAll().find("cannot redefine intrinsic '__shfl_sync' as a function"), std::string::npos);
+
+    std::string src2 = "kernel k(int activemask) {}\n";
+    DiagnosticsEngine diag2;
+    EXPECT_FALSE(checkSource(src2, diag2));
+    EXPECT_NE(diag2.formatAll().find("reserved builtin name"), std::string::npos);
+
+    std::string src3 = "kernel k() { int shfl_down_sync = 1; }\n";
+    DiagnosticsEngine diag3;
+    EXPECT_FALSE(checkSource(src3, diag3));
+    EXPECT_NE(diag3.formatAll().find("reserved builtin name"), std::string::npos);
+
+    std::string src4 = "kernel __shfl_sync() {}\n";
+    DiagnosticsEngine diag4;
+    EXPECT_FALSE(checkSource(src4, diag4));
+    EXPECT_NE(diag4.formatAll().find("cannot redefine intrinsic '__shfl_sync' as a kernel"), std::string::npos);
+}
+
