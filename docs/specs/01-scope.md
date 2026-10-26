@@ -23,9 +23,25 @@
 - Floats: Standard decimal and scientific notation (`3.14`, `1.0f`, `.5`, `1e-3`, `2.5e+2`).
 
 ### Built-in Identifiers
-- `thread_idx` -> `%tid.x` (Thread index in block, x-dimension).
-- `block_idx`  -> `%ctaid.x` (Block/CTA index in grid, x-dimension).
-- `block_dim`  -> `%ntid.x` (Block dimension, x-dimension).
+`kernc` provides complete 1D, 2D, and 3D execution geometry coordinates, accessible either with underscore suffixes (`_x`, `_y`, `_z`), dot notation (`.x`, `.y`, `.z`), or standard CUDA camelCase (`threadIdx.x`, etc.):
+- Thread index in block:
+  - `thread_idx_x`, `thread_idx.x`, `threadIdx.x` (or `thread_idx`) -> `%tid.x`
+  - `thread_idx_y`, `thread_idx.y`, `threadIdx.y` -> `%tid.y`
+  - `thread_idx_z`, `thread_idx.z`, `threadIdx.z` -> `%tid.z`
+- Block / CTA index in grid:
+  - `block_idx_x`, `block_idx.x`, `blockIdx.x` (or `block_idx`) -> `%ctaid.x`
+  - `block_idx_y`, `block_idx.y`, `blockIdx.y` -> `%ctaid.y`
+  - `block_idx_z`, `block_idx.z`, `blockIdx.z` -> `%ctaid.z`
+- Block dimensions (threads per block):
+  - `block_dim_x`, `block_dim.x`, `blockDim.x` (or `block_dim`) -> `%ntid.x`
+  - `block_dim_y`, `block_dim.y`, `blockDim.y` -> `%ntid.y`
+  - `block_dim_z`, `block_dim.z`, `blockDim.z` -> `%ntid.z`
+- Grid dimensions (blocks per grid):
+  - `grid_dim_x`, `grid_dim.x`, `gridDim.x` (or `grid_dim`) -> `%nctaid.x`
+  - `grid_dim_y`, `grid_dim.y`, `gridDim.y` -> `%nctaid.y`
+  - `grid_dim_z`, `grid_dim.z`, `gridDim.z` -> `%nctaid.z`
+
+All built-in identifiers evaluate to 32-bit signed integer values (`int`). Their names are reserved keywords in `Sema` and cannot be shadowed by parameters or local variables.
 
 ### Operators
 - Arithmetic: `+`, `-`, `*`, `/`, `%` (`%` is int-only, lowering to `rem.s32`).

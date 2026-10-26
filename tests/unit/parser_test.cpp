@@ -282,3 +282,41 @@ TEST(ParserTest, UnaryBitwiseNot) {
     ASSERT_NE(notExpr, nullptr);
     EXPECT_EQ(notExpr->op, UnaryOp::BitNot);
 }
+
+TEST(ParserTest, MultiDimensionalBuiltins) {
+    std::string src = "kernel test() {\n"
+                      "    int tx = thread_idx_x; int ty = thread_idx_y; int tz = thread_idx_z;\n"
+                      "    int bx = block_idx_x;  int by = block_idx_y;  int bz = block_idx_z;\n"
+                      "    int dx = block_dim_x;  int dy = block_dim_y;  int dz = block_dim_z;\n"
+                      "    int gx = grid_dim_x;   int gy = grid_dim_y;   int gz = grid_dim_z;\n"
+                      "    int dot_tx = thread_idx.x; int dot_ty = thread_idx.y; int dot_tz = thread_idx.z;\n"
+                      "    int dot_cuda = threadIdx.x + blockIdx.y * blockDim.z + gridDim.x;\n"
+                      "}\n";
+    auto k = parseKernel(src);
+    ASSERT_NE(k, nullptr);
+    ASSERT_EQ(k->body.size(), 16u);
+
+    auto checkBuiltin = [&](size_t idx, BuiltinKind expected) {
+        auto* decl = dynamic_cast<VarDeclStmt*>(k->body[idx].get());
+        ASSERT_NE(decl, nullptr);
+        auto* b = dynamic_cast<BuiltinExpr*>(decl->init.get());
+        ASSERT_NE(b, nullptr);
+        EXPECT_EQ(b->builtin, expected);
+    };
+
+    checkBuiltin(0, BuiltinKind::ThreadIdxX);
+    checkBuiltin(1, BuiltinKind::ThreadIdxY);
+    checkBuiltin(2, BuiltinKind::ThreadIdxZ);
+    checkBuiltin(3, BuiltinKind::BlockIdxX);
+    checkBuiltin(4, BuiltinKind::BlockIdxY);
+    checkBuiltin(5, BuiltinKind::BlockIdxZ);
+    checkBuiltin(6, BuiltinKind::BlockDimX);
+    checkBuiltin(7, BuiltinKind::BlockDimY);
+    checkBuiltin(8, BuiltinKind::BlockDimZ);
+    checkBuiltin(9, BuiltinKind::GridDimX);
+    checkBuiltin(10, BuiltinKind::GridDimY);
+    checkBuiltin(11, BuiltinKind::GridDimZ);
+    checkBuiltin(12, BuiltinKind::ThreadIdxX);
+    checkBuiltin(13, BuiltinKind::ThreadIdxY);
+    checkBuiltin(14, BuiltinKind::ThreadIdxZ);
+}

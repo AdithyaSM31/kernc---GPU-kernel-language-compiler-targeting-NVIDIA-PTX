@@ -499,14 +499,82 @@ std::unique_ptr<Expr> Parser::parsePrimary() {
         expr = parseCast();
     } else if (check(TokenKind::Identifier)) {
         Token tok = advance();
-        if (tok.text == "thread_idx") {
-            expr = std::make_unique<BuiltinExpr>(BuiltinKind::ThreadIdx);
+        bool isThreadIdx = (tok.text == "thread_idx" || tok.text == "threadIdx");
+        bool isBlockIdx  = (tok.text == "block_idx"  || tok.text == "blockIdx");
+        bool isBlockDim  = (tok.text == "block_dim"  || tok.text == "blockDim");
+        bool isGridDim   = (tok.text == "grid_dim"   || tok.text == "gridDim");
+
+        if (isThreadIdx || isBlockIdx || isBlockDim || isGridDim) {
+            char dim = 'x';
+            SourceLocation endLoc = tok.loc;
+            std::string spell = std::string(tok.text);
+            if (match(TokenKind::Dot)) {
+                if (check(TokenKind::Identifier)) {
+                    Token dimTok = advance();
+                    if (dimTok.text == "x" || dimTok.text == "y" || dimTok.text == "z") {
+                        dim = dimTok.text[0];
+                        endLoc = dimTok.loc;
+                        spell += "." + std::string(dimTok.text);
+                    } else {
+                        diag_.error(dimTok.loc, "expected 'x', 'y', or 'z' after '.' in dimension expression");
+                        hasError_ = true;
+                        return nullptr;
+                    }
+                } else {
+                    diag_.error(current_.loc, "expected 'x', 'y', or 'z' after '.' in dimension expression");
+                    hasError_ = true;
+                    return nullptr;
+                }
+            }
+
+            BuiltinKind kind;
+            if (isThreadIdx) {
+                kind = (dim == 'y') ? BuiltinKind::ThreadIdxY : (dim == 'z') ? BuiltinKind::ThreadIdxZ : BuiltinKind::ThreadIdxX;
+            } else if (isBlockIdx) {
+                kind = (dim == 'y') ? BuiltinKind::BlockIdxY : (dim == 'z') ? BuiltinKind::BlockIdxZ : BuiltinKind::BlockIdxX;
+            } else if (isBlockDim) {
+                kind = (dim == 'y') ? BuiltinKind::BlockDimY : (dim == 'z') ? BuiltinKind::BlockDimZ : BuiltinKind::BlockDimX;
+            } else {
+                kind = (dim == 'y') ? BuiltinKind::GridDimY : (dim == 'z') ? BuiltinKind::GridDimZ : BuiltinKind::GridDimX;
+            }
+
+            expr = std::make_unique<BuiltinExpr>(kind, spell);
+            expr->range = {tok.loc, endLoc};
+        } else if (tok.text == "thread_idx_x") {
+            expr = std::make_unique<BuiltinExpr>(BuiltinKind::ThreadIdxX, std::string(tok.text));
             expr->range = {tok.loc, tok.loc};
-        } else if (tok.text == "block_idx") {
-            expr = std::make_unique<BuiltinExpr>(BuiltinKind::BlockIdx);
+        } else if (tok.text == "thread_idx_y") {
+            expr = std::make_unique<BuiltinExpr>(BuiltinKind::ThreadIdxY, std::string(tok.text));
             expr->range = {tok.loc, tok.loc};
-        } else if (tok.text == "block_dim") {
-            expr = std::make_unique<BuiltinExpr>(BuiltinKind::BlockDim);
+        } else if (tok.text == "thread_idx_z") {
+            expr = std::make_unique<BuiltinExpr>(BuiltinKind::ThreadIdxZ, std::string(tok.text));
+            expr->range = {tok.loc, tok.loc};
+        } else if (tok.text == "block_idx_x") {
+            expr = std::make_unique<BuiltinExpr>(BuiltinKind::BlockIdxX, std::string(tok.text));
+            expr->range = {tok.loc, tok.loc};
+        } else if (tok.text == "block_idx_y") {
+            expr = std::make_unique<BuiltinExpr>(BuiltinKind::BlockIdxY, std::string(tok.text));
+            expr->range = {tok.loc, tok.loc};
+        } else if (tok.text == "block_idx_z") {
+            expr = std::make_unique<BuiltinExpr>(BuiltinKind::BlockIdxZ, std::string(tok.text));
+            expr->range = {tok.loc, tok.loc};
+        } else if (tok.text == "block_dim_x") {
+            expr = std::make_unique<BuiltinExpr>(BuiltinKind::BlockDimX, std::string(tok.text));
+            expr->range = {tok.loc, tok.loc};
+        } else if (tok.text == "block_dim_y") {
+            expr = std::make_unique<BuiltinExpr>(BuiltinKind::BlockDimY, std::string(tok.text));
+            expr->range = {tok.loc, tok.loc};
+        } else if (tok.text == "block_dim_z") {
+            expr = std::make_unique<BuiltinExpr>(BuiltinKind::BlockDimZ, std::string(tok.text));
+            expr->range = {tok.loc, tok.loc};
+        } else if (tok.text == "grid_dim_x") {
+            expr = std::make_unique<BuiltinExpr>(BuiltinKind::GridDimX, std::string(tok.text));
+            expr->range = {tok.loc, tok.loc};
+        } else if (tok.text == "grid_dim_y") {
+            expr = std::make_unique<BuiltinExpr>(BuiltinKind::GridDimY, std::string(tok.text));
+            expr->range = {tok.loc, tok.loc};
+        } else if (tok.text == "grid_dim_z") {
+            expr = std::make_unique<BuiltinExpr>(BuiltinKind::GridDimZ, std::string(tok.text));
             expr->range = {tok.loc, tok.loc};
         } else if (match(TokenKind::LParen)) {
             std::vector<std::unique_ptr<Expr>> args;

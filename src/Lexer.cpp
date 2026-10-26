@@ -55,6 +55,7 @@ const char* Token::kindToString(TokenKind kind) {
         case TokenKind::RBracket:     return "]";
         case TokenKind::Semicolon:    return ";";
         case TokenKind::Comma:        return ",";
+        case TokenKind::Dot:          return ".";
         case TokenKind::Eof:          return "<EOF>";
         case TokenKind::Error:        return "<ERROR>";
     }
@@ -293,6 +294,7 @@ Token Lexer::next() {
         case ']': return makeToken(TokenKind::RBracket, 1);
         case ';': return makeToken(TokenKind::Semicolon, 1);
         case ',': return makeToken(TokenKind::Comma, 1);
+        case '.': return makeToken(TokenKind::Dot, 1);
 
         case '=':
             if (peekChar() == '=') {

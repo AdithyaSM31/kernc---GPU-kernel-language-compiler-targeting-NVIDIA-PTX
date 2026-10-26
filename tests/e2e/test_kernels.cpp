@@ -1069,6 +1069,116 @@ TEST_F(KernelE2ETest, BitwiseOperatorsMatchCpu) {
     }
 }
 
+TEST_F(KernelE2ETest, MultiDimensionalExecutionMatchesCpu) {
+    // 1. 2D Coordinate & Dimension Test
+    std::string src2D =
+        "kernel test_dims_2d(int* out, int width, int height) {\n"
+        "    int x = block_idx_x * block_dim_x + thread_idx_x;\n"
+        "    int y = block_idx_y * block_dim_y + thread_idx_y;\n"
+        "    if (x < width && y < height) {\n"
+        "        out[y * width + x] = (x * 1000) + y + (grid_dim_x * 100) + grid_dim_y;\n"
+        "    }\n"
+        "}\n";
+
+    // 2. 3D Coordinate & Dimension Test
+    std::string src3D =
+        "kernel test_dims_3d(int* out, int dim_x, int dim_y, int dim_z) {\n"
+        "    int x = blockIdx.x * blockDim.x + threadIdx.x;\n"
+        "    int y = block_idx.y * block_dim.y + thread_idx.y;\n"
+        "    int z = block_idx_z * block_dim_z + thread_idx_z;\n"
+        "    if (x < dim_x && y < dim_y && z < dim_z) {\n"
+        "        int idx = (z * dim_y + y) * dim_x + x;\n"
+        "        out[idx] = (z * 10000) + (y * 100) + x + (grid_dim_z * 100000);\n"
+        "    }\n"
+        "}\n";
+
+    for (bool optimize : {false, true}) {
+        const char* opt = optimize ? "-O1" : "-O0";
+
+        // Test 2D Kernel
+        {
+            int width = 30;  // 4 blocks of 8 = 32 (with boundary clipping)
+            int height = 45; // 3 blocks of 16 = 48 (with boundary clipping)
+            int total = width * height;
+            unsigned int gx = 4, gy = 3, gz = 1;
+            unsigned int bx = 8, by = 16, bz = 1;
+
+            std::vector<int32_t> expected(total);
+            for (int y = 0; y < height; ++y) {
+                for (int x = 0; x < width; ++x) {
+                    expected[y * width + x] = (x * 1000) + y + (static_cast<int>(gx) * 100) + static_cast<int>(gy);
+                }
+            }
+
+            std::string ptx = compileSourceToPTX(src2D, optimize);
+            ASSERT_FALSE(ptx.empty()) << opt;
+            CUmodule mod = loadPTX(ptx);
+            ASSERT_NE(mod, nullptr) << opt;
+            CUfunction func;
+            CHECK_CUDA(cuModuleGetFunction(&func, mod, "test_dims_2d"));
+
+            std::vector<int32_t> h_out(total, 0);
+            CUdeviceptr d_out;
+            CHECK_CUDA(cuMemAlloc(&d_out, total * sizeof(int32_t)));
+
+            void* args[] = { &d_out, &width, &height };
+            CHECK_CUDA(cuLaunchKernel(func, gx, gy, gz, bx, by, bz, 0, 0, args, 0));
+            CHECK_CUDA(cuCtxSynchronize());
+            CHECK_CUDA(cuMemcpyDtoH(h_out.data(), d_out, total * sizeof(int32_t)));
+
+            for (int i = 0; i < total; ++i) {
+                EXPECT_EQ(h_out[i], expected[i]) << opt << " 2D index " << i;
+            }
+
+            cuMemFree(d_out);
+            cuModuleUnload(mod);
+        }
+
+        // Test 3D Kernel
+        {
+            int dx = 7; // 2 blocks of 4 = 8
+            int dy = 5; // 3 blocks of 2 = 6
+            int dz = 7; // 4 blocks of 2 = 8
+            int total = dx * dy * dz;
+            unsigned int gx = 2, gy = 3, gz = 4;
+            unsigned int bx = 4, by = 2, bz = 2;
+
+            std::vector<int32_t> expected(total);
+            for (int z = 0; z < dz; ++z) {
+                for (int y = 0; y < dy; ++y) {
+                    for (int x = 0; x < dx; ++x) {
+                        int idx = (z * dy + y) * dx + x;
+                        expected[idx] = (z * 10000) + (y * 100) + x + (static_cast<int>(gz) * 100000);
+                    }
+                }
+            }
+
+            std::string ptx = compileSourceToPTX(src3D, optimize);
+            ASSERT_FALSE(ptx.empty()) << opt;
+            CUmodule mod = loadPTX(ptx);
+            ASSERT_NE(mod, nullptr) << opt;
+            CUfunction func;
+            CHECK_CUDA(cuModuleGetFunction(&func, mod, "test_dims_3d"));
+
+            std::vector<int32_t> h_out(total, 0);
+            CUdeviceptr d_out;
+            CHECK_CUDA(cuMemAlloc(&d_out, total * sizeof(int32_t)));
+
+            void* args[] = { &d_out, &dx, &dy, &dz };
+            CHECK_CUDA(cuLaunchKernel(func, gx, gy, gz, bx, by, bz, 0, 0, args, 0));
+            CHECK_CUDA(cuCtxSynchronize());
+            CHECK_CUDA(cuMemcpyDtoH(h_out.data(), d_out, total * sizeof(int32_t)));
+
+            for (int i = 0; i < total; ++i) {
+                EXPECT_EQ(h_out[i], expected[i]) << opt << " 3D index " << i;
+            }
+
+            cuMemFree(d_out);
+            cuModuleUnload(mod);
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     ::testing::AddGlobalTestEnvironment(new CudaEnvironment);

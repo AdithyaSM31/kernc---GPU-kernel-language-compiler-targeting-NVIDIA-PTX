@@ -62,6 +62,7 @@ enum class TokenKind {
     RBracket,   // ]
     Semicolon,  // ;
     Comma,      // ,
+    Dot,        // .
 
     // Special
     Eof,

@@ -90,21 +90,47 @@ struct IdentExpr : public Expr {
 };
 
 enum class BuiltinKind {
-    ThreadIdx,
-    BlockIdx,
-    BlockDim
+    ThreadIdxX,
+    ThreadIdxY,
+    ThreadIdxZ,
+    BlockIdxX,
+    BlockIdxY,
+    BlockIdxZ,
+    BlockDimX,
+    BlockDimY,
+    BlockDimZ,
+    GridDimX,
+    GridDimY,
+    GridDimZ,
+
+    // Aliases for 1D code
+    ThreadIdx = ThreadIdxX,
+    BlockIdx  = BlockIdxX,
+    BlockDim  = BlockDimX,
+    GridDim   = GridDimX
 };
 
 struct BuiltinExpr : public Expr {
     BuiltinKind builtin;
-    explicit BuiltinExpr(BuiltinKind b) : builtin(b) {
+    std::string spelling;
+    explicit BuiltinExpr(BuiltinKind b, std::string s = "") : builtin(b), spelling(std::move(s)) {
         resolvedType = Type::makeInt();
     }
     std::string name() const {
+        if (!spelling.empty()) return spelling;
         switch (builtin) {
-            case BuiltinKind::ThreadIdx: return "thread_idx";
-            case BuiltinKind::BlockIdx:  return "block_idx";
-            case BuiltinKind::BlockDim:  return "block_dim";
+            case BuiltinKind::ThreadIdxX: return "thread_idx";
+            case BuiltinKind::ThreadIdxY: return "thread_idx_y";
+            case BuiltinKind::ThreadIdxZ: return "thread_idx_z";
+            case BuiltinKind::BlockIdxX:  return "block_idx";
+            case BuiltinKind::BlockIdxY:  return "block_idx_y";
+            case BuiltinKind::BlockIdxZ:  return "block_idx_z";
+            case BuiltinKind::BlockDimX:  return "block_dim";
+            case BuiltinKind::BlockDimY:  return "block_dim_y";
+            case BuiltinKind::BlockDimZ:  return "block_dim_z";
+            case BuiltinKind::GridDimX:   return "grid_dim";
+            case BuiltinKind::GridDimY:   return "grid_dim_y";
+            case BuiltinKind::GridDimZ:   return "grid_dim_z";
         }
         return "";
     }

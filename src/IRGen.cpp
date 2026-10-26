@@ -558,9 +558,18 @@ VReg IRGen::emitBuiltin(const BuiltinExpr& expr, IRFunction& fn) {
     VReg r = fn.freshReg(IRType::S32);
     IRInst inst{IROp::ReadSReg, r, 0, 0, IRType::S32};
     switch (expr.builtin) {
-        case BuiltinKind::ThreadIdx: inst.specialReg = "%tid.x"; break;
-        case BuiltinKind::BlockIdx:  inst.specialReg = "%ctaid.x"; break;
-        case BuiltinKind::BlockDim:  inst.specialReg = "%ntid.x"; break;
+        case BuiltinKind::ThreadIdxX: inst.specialReg = "%tid.x"; break;
+        case BuiltinKind::ThreadIdxY: inst.specialReg = "%tid.y"; break;
+        case BuiltinKind::ThreadIdxZ: inst.specialReg = "%tid.z"; break;
+        case BuiltinKind::BlockIdxX:  inst.specialReg = "%ctaid.x"; break;
+        case BuiltinKind::BlockIdxY:  inst.specialReg = "%ctaid.y"; break;
+        case BuiltinKind::BlockIdxZ:  inst.specialReg = "%ctaid.z"; break;
+        case BuiltinKind::BlockDimX:  inst.specialReg = "%ntid.x"; break;
+        case BuiltinKind::BlockDimY:  inst.specialReg = "%ntid.y"; break;
+        case BuiltinKind::BlockDimZ:  inst.specialReg = "%ntid.z"; break;
+        case BuiltinKind::GridDimX:   inst.specialReg = "%nctaid.x"; break;
+        case BuiltinKind::GridDimY:   inst.specialReg = "%nctaid.y"; break;
+        case BuiltinKind::GridDimZ:   inst.specialReg = "%nctaid.z"; break;
     }
     fn.emit(inst);
     return r;

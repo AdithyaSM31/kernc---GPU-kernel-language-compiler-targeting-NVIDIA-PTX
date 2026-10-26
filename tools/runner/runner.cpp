@@ -308,6 +308,44 @@ static void printHelp(const char* prog) {
               << "      --dump 2:8\n" << std::flush;
 }
 
+struct Dim3 {
+    int x = 1;
+    int y = 1;
+    int z = 1;
+};
+
+static bool parseDim3(const std::string& str, Dim3& out) {
+    std::string s = str;
+    for (char& c : s) {
+        if (c == 'x' || c == 'X') c = ',';
+    }
+    std::stringstream ss(s);
+    std::string item;
+    std::vector<int> vals;
+    while (std::getline(ss, item, ',')) {
+        if (item.empty()) return false;
+        try {
+            size_t p = 0;
+            int v = std::stoi(item, &p);
+            if (p != item.size() || v <= 0) return false;
+            vals.push_back(v);
+        } catch (...) {
+            return false;
+        }
+    }
+    if (vals.size() == 1) {
+        out = {vals[0], 1, 1};
+        return true;
+    } else if (vals.size() == 2) {
+        out = {vals[0], vals[1], 1};
+        return true;
+    } else if (vals.size() == 3) {
+        out = {vals[0], vals[1], vals[2]};
+        return true;
+    }
+    return false;
+}
+
 int main(int argc, char** argv) {
     if (argc <= 1) {
         printHelp(argv[0]);
@@ -317,83 +355,69 @@ int main(int argc, char** argv) {
     try {
         std::string ptxPath;
         std::string kernelName;
-    int gridSize = 1;
-    int blockSize = 256;
-    bool verbose = false;
-    std::vector<std::string> rawArgSpecs;
-    std::vector<DumpSpec> dumpSpecs;
+        Dim3 gridDim{1, 1, 1};
+        Dim3 blockDim{256, 1, 1};
+        bool verbose = false;
+        std::vector<std::string> rawArgSpecs;
+        std::vector<DumpSpec> dumpSpecs;
 
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
+        for (int i = 1; i < argc; ++i) {
+            std::string arg = argv[i];
 
-        if (arg == "-h" || arg == "--help") {
-            printHelp(argv[0]);
-            return 0;
-        } else if (arg == "-v" || arg == "--verbose") {
-            verbose = true;
-        } else if (arg == "-p" || arg == "--ptx") {
-            if (i + 1 >= argc) {
-                std::cerr << "Error: " << arg << " requires a path argument.\n";
-                return 1;
-            }
-            ptxPath = argv[++i];
-        } else if (arg.rfind("--ptx=", 0) == 0) {
-            ptxPath = arg.substr(6);
-        } else if (arg == "-k" || arg == "--kernel") {
-            if (i + 1 >= argc) {
-                std::cerr << "Error: " << arg << " requires a kernel name argument.\n";
-                return 1;
-            }
-            kernelName = argv[++i];
-        } else if (arg.rfind("--kernel=", 0) == 0) {
-            kernelName = arg.substr(9);
-        } else if (arg == "-g" || arg == "--grid") {
-            if (i + 1 >= argc) {
-                std::cerr << "Error: " << arg << " requires an integer value.\n";
-                return 1;
-            }
-            try {
-                size_t p = 0;
-                gridSize = std::stoi(argv[++i], &p);
-                if (p != std::string(argv[i]).size()) throw std::invalid_argument("trailing");
-            } catch (...) {
-                std::cerr << "Error: Invalid grid size '" << argv[i] << "'.\n";
-                return 1;
-            }
-        } else if (arg.rfind("--grid=", 0) == 0) {
-            std::string val = arg.substr(7);
-            try {
-                size_t p = 0;
-                gridSize = std::stoi(val, &p);
-                if (p != val.size()) throw std::invalid_argument("trailing");
-            } catch (...) {
-                std::cerr << "Error: Invalid grid size '" << val << "'.\n";
-                return 1;
-            }
-        } else if (arg == "-b" || arg == "--block") {
-            if (i + 1 >= argc) {
-                std::cerr << "Error: " << arg << " requires an integer value.\n";
-                return 1;
-            }
-            try {
-                size_t p = 0;
-                blockSize = std::stoi(argv[++i], &p);
-                if (p != std::string(argv[i]).size()) throw std::invalid_argument("trailing");
-            } catch (...) {
-                std::cerr << "Error: Invalid block size '" << argv[i] << "'.\n";
-                return 1;
-            }
-        } else if (arg.rfind("--block=", 0) == 0) {
-            std::string val = arg.substr(8);
-            try {
-                size_t p = 0;
-                blockSize = std::stoi(val, &p);
-                if (p != val.size()) throw std::invalid_argument("trailing");
-            } catch (...) {
-                std::cerr << "Error: Invalid block size '" << val << "'.\n";
-                return 1;
-            }
-        } else if (arg == "--arg") {
+            if (arg == "-h" || arg == "--help") {
+                printHelp(argv[0]);
+                return 0;
+            } else if (arg == "-v" || arg == "--verbose") {
+                verbose = true;
+            } else if (arg == "-p" || arg == "--ptx") {
+                if (i + 1 >= argc) {
+                    std::cerr << "Error: " << arg << " requires a path argument.\n";
+                    return 1;
+                }
+                ptxPath = argv[++i];
+            } else if (arg.rfind("--ptx=", 0) == 0) {
+                ptxPath = arg.substr(6);
+            } else if (arg == "-k" || arg == "--kernel") {
+                if (i + 1 >= argc) {
+                    std::cerr << "Error: " << arg << " requires a kernel name argument.\n";
+                    return 1;
+                }
+                kernelName = argv[++i];
+            } else if (arg.rfind("--kernel=", 0) == 0) {
+                kernelName = arg.substr(9);
+            } else if (arg == "-g" || arg == "--grid") {
+                if (i + 1 >= argc) {
+                    std::cerr << "Error: " << arg << " requires an integer value.\n";
+                    return 1;
+                }
+                std::string val = argv[++i];
+                if (!parseDim3(val, gridDim)) {
+                    std::cerr << "Error: Invalid grid size '" << val << "'.\n";
+                    return 1;
+                }
+            } else if (arg.rfind("--grid=", 0) == 0) {
+                std::string val = arg.substr(7);
+                if (!parseDim3(val, gridDim)) {
+                    std::cerr << "Error: Invalid grid size '" << val << "'.\n";
+                    return 1;
+                }
+            } else if (arg == "-b" || arg == "--block") {
+                if (i + 1 >= argc) {
+                    std::cerr << "Error: " << arg << " requires an integer value.\n";
+                    return 1;
+                }
+                std::string val = argv[++i];
+                if (!parseDim3(val, blockDim)) {
+                    std::cerr << "Error: Invalid block size '" << val << "'.\n";
+                    return 1;
+                }
+            } else if (arg.rfind("--block=", 0) == 0) {
+                std::string val = arg.substr(8);
+                if (!parseDim3(val, blockDim)) {
+                    std::cerr << "Error: Invalid block size '" << val << "'.\n";
+                    return 1;
+                }
+            } else if (arg == "--arg") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --arg requires a specification.\n";
                 return 1;
@@ -486,12 +510,12 @@ int main(int argc, char** argv) {
         printHelp(argv[0]);
         return 1;
     }
-    if (gridSize <= 0) {
-        std::cerr << "Error: Grid size must be positive (got " << gridSize << ").\n";
+    if (gridDim.x <= 0 || gridDim.y <= 0 || gridDim.z <= 0) {
+        std::cerr << "Error: Grid dimensions must be positive.\n";
         return 1;
     }
-    if (blockSize <= 0) {
-        std::cerr << "Error: Block size must be positive (got " << blockSize << ").\n";
+    if (blockDim.x <= 0 || blockDim.y <= 0 || blockDim.z <= 0) {
+        std::cerr << "Error: Block dimensions must be positive.\n";
         return 1;
     }
 
@@ -815,15 +839,25 @@ int main(int argc, char** argv) {
         }
     }
 
-    std::cout << "[Runner] Launching kernel: grid=" << gridSize
-              << " block=" << blockSize
-              << " args=" << kernelArgs.size() << "\n" << std::flush;
+    std::cout << "[Runner] Launching kernel: grid=";
+    if (gridDim.y == 1 && gridDim.z == 1) {
+        std::cout << gridDim.x;
+    } else {
+        std::cout << gridDim.x << "x" << gridDim.y << "x" << gridDim.z;
+    }
+    std::cout << " block=";
+    if (blockDim.y == 1 && blockDim.z == 1) {
+        std::cout << blockDim.x;
+    } else {
+        std::cout << blockDim.x << "x" << blockDim.y << "x" << blockDim.z;
+    }
+    std::cout << " args=" << kernelArgs.size() << "\n" << std::flush;
 
     void** kernelParams = paramPointers.empty() ? nullptr : paramPointers.data();
     res = cuLaunchKernel(
         func,
-        gridSize, 1, 1,
-        blockSize, 1, 1,
+        gridDim.x, gridDim.y, gridDim.z,
+        blockDim.x, blockDim.y, blockDim.z,
         0,
         nullptr,
         kernelParams,

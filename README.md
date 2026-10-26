@@ -21,6 +21,7 @@ kernel saxpy(float a, float* x, float* y, int n) {
 What it supports:
 
 - `int`, `float` and `bool`; `int*` / `float*` parameters; `shared` arrays
+- 1D, 2D, and 3D execution geometry (`thread_idx[_x|_y|_z]`, `block_idx_*`, `block_dim_*`, `grid_dim_*`, or `.x/.y/.z`)
 - device functions (`func`), including recursion and mutual recursion
 - `if` / `else`, `while`, `for`, `return`, `barrier()`
 - short-circuit `&&` / `||`, in conditions and as values
@@ -30,7 +31,7 @@ What it supports:
 - `.file` / `.loc` source line info with `-lineinfo`
 - diagnostics with `file:line:column` and a caret
 
-The suite has 111 tests, and all of them pass, both in a normal build and under
+The suite has 118 tests, and all of them pass, both in a normal build and under
 UndefinedBehaviorSanitizer.
 
 ---
@@ -104,7 +105,7 @@ The full reference is in [docs/specs/01-scope.md](docs/specs/01-scope.md).
 | | |
 |---|---|
 | Types | `int` (`.s32`), `float` (`.f32`), `bool` (`.pred`); `int*` / `float*` as parameters |
-| Built-ins | `thread_idx` → `%tid.x`, `block_idx` → `%ctaid.x`, `block_dim` → `%ntid.x` (x dimension only) |
+| Built-ins | `thread_idx[_x\|_y\|_z]`, `block_idx_*`, `block_dim_*`, `grid_dim_*` (or `.x`, `.y`, `.z` / `threadIdx`, etc.) |
 | Statements | declarations, assignment, `if`/`else`, `while`, `for`, `return`, `barrier();`, `shared T name[N];`, function calls |
 | Operators | `+ - * / %`, unary `- ! ~`, `& \| ^ << >>`, `< <= > >= == !=`, `&&` `\|\|` (short-circuit), `p[i]` |
 | Casts | `cast<int>(x)`, `cast<float>(x)`, `cast<bool>(x)` |
@@ -414,7 +415,7 @@ Every fix is in the commit history, together with a test that failed before the 
   but an undefined value, as in C, and kernc doesn't warn about it.
 - **No barrier-divergence warning.** A `barrier()` behind a thread-dependent condition (or
   after an early `return` taken by some threads) isn't diagnosed.
-- **Not yet supported:** y/z dimensions, structs, 64-bit types other than pointers, and
+- **Not yet supported:** structs, 64-bit types other than pointers, and
   `bool` kernel parameters.
 - **Line info is per statement**, not per expression. Also, `-(2147483648)` is accepted
   because parentheses aren't kept in the AST; Java rejects it.

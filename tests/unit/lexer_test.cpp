@@ -170,3 +170,24 @@ TEST(LexerTest, BitwiseOperators) {
     EXPECT_EQ(lex.next().kind, TokenKind::GreaterEq);
     EXPECT_EQ(lex.next().kind, TokenKind::Eof);
 }
+
+TEST(LexerTest, DotPunctuation) {
+    std::string src = "a.x b.y c.z 1.5 .25";
+    Lexer lex(src);
+
+    EXPECT_EQ(lex.next().kind, TokenKind::Identifier); // a
+    EXPECT_EQ(lex.next().kind, TokenKind::Dot);        // .
+    EXPECT_EQ(lex.next().kind, TokenKind::Identifier); // x
+
+    EXPECT_EQ(lex.next().kind, TokenKind::Identifier); // b
+    EXPECT_EQ(lex.next().kind, TokenKind::Dot);        // .
+    EXPECT_EQ(lex.next().kind, TokenKind::Identifier); // y
+
+    EXPECT_EQ(lex.next().kind, TokenKind::Identifier); // c
+    EXPECT_EQ(lex.next().kind, TokenKind::Dot);        // .
+    EXPECT_EQ(lex.next().kind, TokenKind::Identifier); // z
+
+    EXPECT_EQ(lex.next().kind, TokenKind::FloatLiteral); // 1.5
+    EXPECT_EQ(lex.next().kind, TokenKind::FloatLiteral); // .25
+    EXPECT_EQ(lex.next().kind, TokenKind::Eof);
+}

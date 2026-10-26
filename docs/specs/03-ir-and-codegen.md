@@ -128,3 +128,14 @@ The IR is a non-SSA 3-address virtual-register code organized into Basic Blocks 
       - Neutral elements: `x & -1 = x`, `x | 0 = x`, `x ^ 0 = x`, `x << 0 = x`, `x >> 0 = x`.
       - Self-cancellation: `x ^ x = 0`, `x - x = 0`.
       - Constant evaluation: `Passes.cpp` folds bitwise operations with full 32-bit unsigned wrapping semantics (`uint32_t`), ensuring identical behavior across host compilation and GPU target execution.
+
+11. **Multi-Dimensional Execution Geometry (2D & 3D Built-ins)**:
+    - Special registers in PTX are 32-bit unsigned registers read via `mov.u32 %r, %special;`:
+      - Thread indices: `%tid.x`, `%tid.y`, `%tid.z`
+      - Block indices: `%ctaid.x`, `%ctaid.y`, `%ctaid.z`
+      - Block dimensions: `%ntid.x`, `%ntid.y`, `%ntid.z`
+      - Grid dimensions: `%nctaid.x`, `%nctaid.y`, `%nctaid.z`
+    - Target mapping in SASS (sm_86):
+      - `%tid` and `%ctaid` map to hardware special registers read by the `S2R` (Special Register to Register) instruction (e.g. `S2R R0, SR_TID.X`, `SR_CTAID.Y`).
+      - `%ntid` and `%nctaid` represent kernel launch metadata passed via Driver API launch parameters; `ptxas` resolves them from Constant Memory Bank 0 (`c[0x0]`) or uniform registers without consuming special register file capacity.
+    - `kernc-runner` accepts multi-dimensional geometry syntax (`--grid 4x4`, `--grid 2,3,4`, `--block 16x16`, `--block 4,2,2`), launching via `cuLaunchKernel` across all 6 grid/block dimensions.

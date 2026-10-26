@@ -21,6 +21,17 @@ static bool returnsOnAllPaths(const Stmt& stmt) {
     return false;
 }
 
+static bool isReservedBuiltinName(std::string_view name) {
+    return name == "thread_idx"   || name == "threadIdx"   ||
+           name == "thread_idx_x" || name == "thread_idx_y" || name == "thread_idx_z" ||
+           name == "block_idx"    || name == "blockIdx"    ||
+           name == "block_idx_x"  || name == "block_idx_y"  || name == "block_idx_z"  ||
+           name == "block_dim"    || name == "blockDim"    ||
+           name == "block_dim_x"  || name == "block_dim_y"  || name == "block_dim_z"  ||
+           name == "grid_dim"     || name == "gridDim"     ||
+           name == "grid_dim_x"   || name == "grid_dim_y"   || name == "grid_dim_z";
+}
+
 bool Sema::checkProgram(Program& program) {
     functions_.clear();
     bool ok = true;
@@ -80,7 +91,7 @@ bool Sema::checkFunction(FunctionDecl& kernel) {
             diag_.error(param.loc, (kernel.isKernel ? "kernel parameter '" : "parameter '") + param.name + "' cannot have type 'void'");
             continue;
         }
-        if (param.name == "thread_idx" || param.name == "block_idx" || param.name == "block_dim") {
+        if (isReservedBuiltinName(param.name)) {
             diag_.error(param.loc, (kernel.isKernel ? "kernel parameter cannot have reserved builtin name '" : "parameter cannot have reserved builtin name '") + param.name + "'");
             continue;
         }
@@ -139,7 +150,7 @@ void Sema::checkSharedDecl(SharedDeclStmt& stmt) {
         diag_.error(stmt.range.begin, "shared array '" + stmt.name + "' must have a positive size");
         ok = false;
     }
-    if (stmt.name == "thread_idx" || stmt.name == "block_idx" || stmt.name == "block_dim") {
+    if (isReservedBuiltinName(stmt.name)) {
         diag_.error(stmt.range.begin, "cannot declare variable with reserved builtin name '" + stmt.name + "'");
         return;
     }
@@ -215,7 +226,7 @@ void Sema::checkStmt(Stmt& stmt) {
 }
 
 void Sema::checkVarDecl(VarDeclStmt& stmt) {
-    if (stmt.name == "thread_idx" || stmt.name == "block_idx" || stmt.name == "block_dim") {
+    if (isReservedBuiltinName(stmt.name)) {
         diag_.error(stmt.range.begin, "cannot declare variable with reserved builtin name '" + stmt.name + "'");
         return;
     }

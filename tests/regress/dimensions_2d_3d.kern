@@ -1,0 +1,16 @@
+// Regression test: 2D and 3D thread and block dimensions compiled at -O0 and -O1.
+kernel test_regress_dims(int* out, int width, int height, int depth) {
+    int x = block_idx_x * block_dim_x + thread_idx_x;
+    int y = block_idx_y * block_dim_y + thread_idx_y;
+    int z = block_idx_z * block_dim_z + thread_idx_z;
+
+    if (x < width && y < height && z < depth) {
+        int idx = (z * height + y) * width + x;
+        // Verify dot notation and camelCase builtins as well
+        int dot_x = blockIdx.x * blockDim.x + threadIdx.x;
+        int dot_y = block_idx.y * block_dim.y + thread_idx.y;
+        int dot_z = block_idx.z * block_dim.z + thread_idx.z;
+        int total_threads = grid_dim_x * grid_dim_y * grid_dim_z * block_dim_x * block_dim_y * block_dim_z;
+        out[idx] = (dot_x + dot_y + dot_z) ^ total_threads;
+    }
+}

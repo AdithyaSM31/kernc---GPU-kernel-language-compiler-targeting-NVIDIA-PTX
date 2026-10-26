@@ -316,3 +316,32 @@ TEST(SemaTest, BitwiseNotOnFloatRejected) {
     EXPECT_TRUE(diag.hasErrors());
     EXPECT_NE(diag.formatAll().find("unary '~' requires integer operand"), std::string::npos);
 }
+
+TEST(SemaTest, MultiDimensionalBuiltinsAccepted) {
+    std::string src = "kernel test(int* out) {\n"
+                      "    int idx = (thread_idx_z * block_dim_y + thread_idx_y) * block_dim_x + thread_idx_x;\n"
+                      "    int bidx = (block_idx_z * grid_dim_y + block_idx_y) * grid_dim_x + block_idx_x;\n"
+                      "    out[idx] = bidx;\n"
+                      "}\n";
+    DiagnosticsEngine diag;
+    bool ok = checkSource(src, diag);
+    EXPECT_TRUE(ok) << diag.formatAll();
+    EXPECT_FALSE(diag.hasErrors());
+}
+
+TEST(SemaTest, MultiDimensionalBuiltinShadowingRejected) {
+    std::string src1 = "kernel test(int thread_idx_y) {}\n";
+    DiagnosticsEngine diag1;
+    EXPECT_FALSE(checkSource(src1, diag1));
+    EXPECT_NE(diag1.formatAll().find("reserved builtin name"), std::string::npos);
+
+    std::string src2 = "kernel test() { int block_idx_z = 0; }\n";
+    DiagnosticsEngine diag2;
+    EXPECT_FALSE(checkSource(src2, diag2));
+    EXPECT_NE(diag2.formatAll().find("reserved builtin name"), std::string::npos);
+
+    std::string src3 = "kernel test() { int grid_dim_x = 0; }\n";
+    DiagnosticsEngine diag3;
+    EXPECT_FALSE(checkSource(src3, diag3));
+    EXPECT_NE(diag3.formatAll().find("reserved builtin name"), std::string::npos);
+}
