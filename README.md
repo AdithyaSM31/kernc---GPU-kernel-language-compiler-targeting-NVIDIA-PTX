@@ -35,7 +35,7 @@ What it supports:
 - `.file` / `.loc` source line info with `-lineinfo`
 - diagnostics with `file:line:column` and a caret
 
-The suite has 148 tests, and all of them pass, both in a normal build and under
+The suite has 163 tests, and all of them pass, both in a normal build and under
 UndefinedBehaviorSanitizer.
 
 ---
@@ -367,11 +367,11 @@ intrinsics, calls, and branches, while respecting RAW, WAR, and WAW memory depen
 
 | Suite | Count | What it checks |
 |---|---|---|
-| Unit tests (GoogleTest) | 92 | Lexer 9, parser 14, Sema 31 (accept/reject, type/arity rules, diagnostic locations), IR, passes, scheduling & PTX 38 |
-| GPU end-to-end (Driver API) | 24 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
+| Unit tests (GoogleTest) | 102 | Lexer 9, parser 15, Sema 33 (accept/reject, type/arity rules, diagnostic locations), IR, passes, scheduling & PTX 45 |
+| GPU end-to-end (Driver API) | 27 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
 | Diagnostics | 1 suite, 8 files | `tests/diagnostic/err_*.kern` must fail with the expected message (and location, where given) |
 | ptxas acceptance | 6 | Every file in `examples/` assembles with `ptxas -arch=sm_86` |
-| ptxas regression | 22 | `tests/regress/*.kern` (11 kernels) assemble at both `-O0` and `-O1` |
+| ptxas regression | 24 | `tests/regress/*.kern` (12 kernels) assemble at both `-O0` and `-O1` |
 | Line tables | 2 | `kernc -lineinfo` → ptxas → `nvdisasm --print-line-info`; each `//@ REGEX` line must own matching SASS |
 | Runner CLI e2e | 1 suite, 20 stages | `kernc-runner` driver invocation, argument marshaling, device execution and error validation |
 
@@ -393,7 +393,12 @@ The GPU tests cover:
   constants;
 - a differential test where `-O0` (GPU `div.s32`/`rem.s32`) and `-O1` (strength-reduced shifts/masks)
   must give bit-identical results across positive, negative, zero, and `INT_MIN` values for `/ 2^k` and `% 2^k`;
-- loop unrolling and latency-hiding instruction scheduling across a 5-point stencil filter, 8-element dot-product reduction, and pipelined multi-stream load/ALU/store sequences at `-O0` and `-O1` vs CPU reference.
+- loop unrolling and latency-hiding instruction scheduling across a 5-point stencil filter, 8-element dot-product reduction, and pipelined multi-stream load/ALU/store sequences at `-O0` and `-O1` vs CPU reference;
+- the scheduler keeping a store before a load when memory may alias: two kernel pointer
+  parameters (or two device-function parameters) given the same buffer, and one thread
+  storing and then loading the same shared element;
+- vector intrinsic offsets counted in whole vectors (`load_int4(p, 1)` reads `p[4..7]`) on
+  global and shared scalar buffers, without misaligned-address faults.
 
 Two techniques do most of the work:
 
@@ -403,7 +408,7 @@ Two techniques do most of the work:
   - the old float-to-int fold fails the differential test;
   - `setp.ne` instead of `setp.neu` fails the NaN case;
   - `shfl.sync.up` instead of `shfl.sync.down` fails the warp tree reduction test;
-  - inverting list scheduling priority (stores high, loads low) fails the load-hoisting latency check (`lastLoadIdx < firstStoreIdx`);
+  - inverting list scheduling priority (stores high, loads low) fails the load-hoisting latency check (`lastLoadIdx < firstStoreIdx`, on two different shared arrays);
   - removing `bar.sync` fails the block-reverse test, first at thread 64, the first thread of
     the third warp, which read data before its partner warp had written it;
   - removing statement locations fails all six line-table checks;
@@ -425,6 +430,9 @@ these bugs:
 | Comparisons used as values | Lowered to `add.s32` (hidden until `bool` existed) |
 | Out-of-range literals | `3000000000` was silently truncated |
 | Generated PTX names shared the user namespace | A function named `entry`, `f_retval` or `k_buf` (or two kernels' arrays, `k`+`b_uf` vs `k_b`+`uf`) made ptxas reject a valid program |
+| Scheduler treated different base pointers as non-aliasing | **Wrong results at `-O1`**: with `a == b`, `a[i] = 42; out[i] = b[i];` read the stale value, because the load moved above the store (two accesses to one shared array too) |
+| Shift folding masked the count to 5 bits (x86) | `1 << 32` folded to 1 and `1000 >> 40` to 3, but PTX clamps the count, so the GPU gives 0 at `-O0` |
+| Vector intrinsic offsets counted scalars | `load_int4(p, 1)` issued a 16-byte load at a 4-byte boundary: **`CUDA_ERROR_MISALIGNED_ADDRESS`** |
 
 Every fix is in the commit history, together with a test that failed before the fix.
 

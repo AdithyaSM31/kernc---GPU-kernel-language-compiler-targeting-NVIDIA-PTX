@@ -188,8 +188,8 @@ The IR is a non-SSA 3-address virtual-register code organized into Basic Blocks 
       - `LoadV2`, `LoadV4`: Load 2 or 4 elements from global or shared memory into multiple destination virtual registers stored in `inst.dsts`.
       - `StoreV2`, `StoreV4`: Store 2 or 4 elements from arguments stored in `inst.args` into global or shared memory.
     - Addressing and Alignment:
-      - Vector global addresses scale the index by `elemType.sizeInBytes()` (8 bytes for v2, 16 bytes for v4) using 64-bit address arithmetic (`mul.wide.s32` and `add.s64`).
-      - Shared vector arrays are emitted with explicit alignment: `.shared .align 8 .<type>` for v2, `.shared .align 16 .<type>` for v4.
+      - Vector global addresses scale the index by the vector size (8 bytes for v2, 16 bytes for v4) using 64-bit address arithmetic (`mul.wide.s32` and `add.s64`). The `load_*`/`store_*` intrinsics scale their offset the same way, by the size of the vector they access, whatever the buffer's element type, so every v2/v4 access is naturally aligned.
+      - Every shared array is emitted with `.shared .align 16`, so the v4 intrinsics also work on scalar shared arrays.
     - PTX Lowering:
       - Lowers directly to PTX vector load/store instructions:
         - `ld.{global|shared}.v2.{s32|f32} {%d0, %d1}, [addr];`
@@ -213,7 +213,7 @@ The IR is a non-SSA 3-address virtual-register code organized into Basic Blocks 
     - **Local Dependency DAG Construction**:
       - Instructions within basic blocks are scheduled between fences/barriers (`barrier()`, atomics, shuffles, calls, and terminators).
       - Tracks register RAW (dataflow), WAR (anti-dependency), and WAW (output dependency).
-      - Memory aliasing: Tracks pointer base registers back to parameter roots and shared memory symbols. Disjoint pointer bases allow hoisting loads above stores, while identical or unknown bases enforce conservative RAW/WAR memory hazard edges.
+      - Memory aliasing: a load and a store in the same state space are ordered unless they provably touch different memory. The only provable case is two *different shared arrays* (identified by symbol, since every access computes its own base register). Global pointers, whether kernel or device-function parameters, may alias each other as in C/CUDA without `__restrict__`, so their loads never move above their stores. (An earlier version treated distinct base registers as disjoint, which miscompiled `a[i] = 42; out[i] = b[i];` with `a == b`, and even two accesses to one shared array.)
       - Sequential store order is strictly preserved (Store -> Store edges).
     - **Latency-Aware List Scheduling**:
       - Base instruction latencies on sm_86: Global Loads = 100, Shared Loads = 80, Parameter/SReg/Immediate reads = 50, Address computations = 40, ALU/conversions = 20, Stores = 1.

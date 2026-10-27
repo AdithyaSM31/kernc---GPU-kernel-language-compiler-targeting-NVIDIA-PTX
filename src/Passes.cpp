@@ -21,6 +21,23 @@ static int32_t subS32(int32_t a, int32_t b) { return wrap(static_cast<uint32_t>(
 static int32_t mulLoS32(int32_t a, int32_t b) { return wrap(static_cast<uint32_t>(a) * static_cast<uint32_t>(b)); }
 static int32_t negS32(int32_t a) { return wrap(0u - static_cast<uint32_t>(a)); }
 
+// shl.b32 / shr.u32 / shr.s32 clamp the shift count (read as unsigned) to 32, so a count of
+// 32 or more shifts every bit out: 0, or all sign bits for shr.s32. In C++ such shifts are
+// undefined, and x86 masks the count to 5 bits, so neither matches the GPU.
+static int32_t shlB32(int32_t a, int32_t n) {
+    uint32_t c = static_cast<uint32_t>(n);
+    return c >= 32 ? 0 : wrap(static_cast<uint32_t>(a) << c);
+}
+static int32_t shrU32(int32_t a, int32_t n) {
+    uint32_t c = static_cast<uint32_t>(n);
+    return c >= 32 ? 0 : wrap(static_cast<uint32_t>(a) >> c);
+}
+static int32_t shrS32(int32_t a, int32_t n) {
+    uint32_t c = static_cast<uint32_t>(n);
+    if (c >= 32) return a < 0 ? -1 : 0;
+    return a >> c; // arithmetic on GCC/Clang (guaranteed from C++20)
+}
+
 // div.s32/rem.s32 truncate toward zero like C++, but division by zero and INT_MIN / -1 give
 // an unspecified result on the GPU (and trap on x86), so those are never folded.
 static bool canFoldDivS32(int32_t a, int32_t b) { return b != 0 && !(a == INT32_MIN && b == -1); }
@@ -106,15 +123,9 @@ bool Optimizer::runConstantFolding(IRFunction& fn) {
                         case IROp::And: res = c1.intVal & c2.intVal; break;
                         case IROp::Or:  res = c1.intVal | c2.intVal; break;
                         case IROp::Xor: res = c1.intVal ^ c2.intVal; break;
-                        case IROp::Shl:
-                            res = ptx::wrap(static_cast<uint32_t>(c1.intVal) << (static_cast<uint32_t>(c2.intVal) & 31u));
-                            break;
-                        case IROp::ShrS32:
-                            res = c1.intVal >> (static_cast<uint32_t>(c2.intVal) & 31u);
-                            break;
-                        case IROp::ShrU32:
-                            res = ptx::wrap(static_cast<uint32_t>(c1.intVal) >> (static_cast<uint32_t>(c2.intVal) & 31u));
-                            break;
+                        case IROp::Shl:    res = ptx::shlB32(c1.intVal, c2.intVal); break;
+                        case IROp::ShrS32: res = ptx::shrS32(c1.intVal, c2.intVal); break;
+                        case IROp::ShrU32: res = ptx::shrU32(c1.intVal, c2.intVal); break;
                         default:
                             folded = false;
                             break;
@@ -650,8 +661,25 @@ static std::unordered_map<VReg, VReg> computePointerBases(const IRFunction& fn) 
     return pointerBase;
 }
 
+// Maps every address register derived from a SharedAddr to that shared array's symbol. Each
+// access computes its own base register, so the symbol (not the register) identifies the array.
+static std::unordered_map<VReg, std::string> computeSharedObjects(
+        const IRFunction& fn, const std::unordered_map<VReg, VReg>& pointerBases) {
+    std::unordered_map<VReg, std::string> symbolOfBase;
+    for (const auto& bb : fn.blocks)
+        for (const auto& inst : bb.instructions)
+            if (inst.op == IROp::SharedAddr && inst.dst != 0) symbolOfBase[inst.dst] = inst.symbol;
+
+    std::unordered_map<VReg, std::string> objectOf;
+    for (const auto& [reg, base] : pointerBases) {
+        auto it = symbolOfBase.find(base);
+        if (it != symbolOfBase.end()) objectOf[reg] = it->second;
+    }
+    return objectOf;
+}
+
 static std::vector<IRInst> scheduleWindow(const std::vector<IRInst>& window,
-                                          const std::unordered_map<VReg, VReg>& pointerBases) {
+                                          const std::unordered_map<VReg, std::string>& sharedObjects) {
     const size_t N = window.size();
     if (N <= 1) return window;
 
@@ -661,15 +689,15 @@ static std::vector<IRInst> scheduleWindow(const std::vector<IRInst>& window,
 
     std::vector<std::vector<VReg>> defs(N);
     std::vector<std::vector<VReg>> uses(N);
-    std::vector<VReg> baseRegs(N, 0);
+    std::vector<std::string> sharedObject(N); // shared array accessed, or empty if unknown
 
     for (size_t i = 0; i < N; ++i) {
         getDefs(window[i], defs[i]);
         getUses(window[i], uses[i]);
-        if (isMemOp(window[i].op)) {
-            auto it = pointerBases.find(window[i].src1);
-            if (it != pointerBases.end()) {
-                baseRegs[i] = it->second;
+        if (isMemOp(window[i].op) && window[i].space == AddrSpace::Shared) {
+            auto it = sharedObjects.find(window[i].src1);
+            if (it != sharedObjects.end()) {
+                sharedObject[i] = it->second;
             }
         }
     }
@@ -720,10 +748,13 @@ static std::vector<IRInst> scheduleWindow(const std::vector<IRInst>& window,
                         // Preserve relative store order
                         dependent = true;
                     } else if (isStoreOp(m1.op) || isStoreOp(m2.op)) {
-                        // Aliased store-load or load-store hazard
-                        VReg b1 = baseRegs[i];
-                        VReg b2 = baseRegs[j];
-                        if (b1 == 0 || b2 == 0 || b1 == b2) {
+                        // A load and a store may only be reordered if they provably touch
+                        // different memory. The one provable case is two different shared
+                        // arrays. Global pointers may alias each other (as in C/CUDA without
+                        // __restrict__), and two accesses to one shared array may overlap.
+                        bool disjoint = !sharedObject[i].empty() && !sharedObject[j].empty() &&
+                                        sharedObject[i] != sharedObject[j];
+                        if (!disjoint) {
                             dependent = true;
                         }
                     }
@@ -786,7 +817,7 @@ static std::vector<IRInst> scheduleWindow(const std::vector<IRInst>& window,
 
 bool Optimizer::runInstructionScheduling(IRFunction& fn) {
     bool changedOverall = false;
-    auto pointerBases = computePointerBases(fn);
+    auto sharedObjects = computeSharedObjects(fn, computePointerBases(fn));
 
     for (auto& bb : fn.blocks) {
         std::vector<IRInst> newInstructions;
@@ -807,7 +838,7 @@ bool Optimizer::runInstructionScheduling(IRFunction& fn) {
                 continue;
             }
             std::vector<IRInst> window(bb.instructions.begin() + start, bb.instructions.begin() + idx);
-            auto scheduled = scheduleWindow(window, pointerBases);
+            auto scheduled = scheduleWindow(window, sharedObjects);
             for (size_t k = 0; k < count; ++k) {
                 if (window[k].op != scheduled[k].op || window[k].dst != scheduled[k].dst || window[k].src1 != scheduled[k].src1) {
                     changedOverall = true;

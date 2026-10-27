@@ -14,7 +14,7 @@
   - `float2`: 2-element vector of `float` (8 bytes, 8-byte aligned).
   - `float4`: 4-element vector of `float` (16 bytes, 16-byte aligned).
 - Pointers: `int*`, `float*`, `int2*`, `int4*`, `float2*`, `float4*` (valid as kernel and device function parameters). Pointer indexing scales by the pointee size (4, 8, or 16 bytes).
-- Shared arrays: `shared int`, `shared float`, `shared int2`, `shared int4`, `shared float2`, `shared float4`. Declared with explicit static size `[N]`. Vector shared arrays are aligned to 8 or 16 bytes (`.align 8` / `.align 16`).
+- Shared arrays: `shared int`, `shared float`, `shared int2`, `shared int4`, `shared float2`, `shared float4`. Declared with explicit static size `[N]`. Every shared array is aligned to 16 bytes (`.align 16`).
 - `bool`: `true` / `false`, held in `.pred` registers. Comparisons and `!`, `&&`, `||` produce
   `bool`. It does not convert implicitly to or from `int`/`float` (use `cast<>`), cannot be a
   kernel parameter (`.param` has no predicate type; pass an `int`), and has no pointer type.
@@ -65,6 +65,9 @@ All built-in identifiers evaluate to 32-bit signed integer values (`int`). Their
 ### Operators
 - Arithmetic: `+`, `-`, `*`, `/`, `%` (`%` is int-only, lowering to `rem.s32`).
 - Bitwise: `&`, `|`, `^`, `<<`, `>>` on 32-bit `int` operands, lowering to `and.b32`, `or.b32`, `xor.b32`, `shl.b32`, `shr.s32`.
+  Shifts follow PTX, not C: the count is read as unsigned and clamped to 32, so `x << 32`,
+  `x << -1` and `x >> 40` are defined. A count of 32 or more gives 0 for `<<`, and all sign
+  bits (0 or -1) for `>>`. Constant folding uses the same rule.
 - Unary: `-` (arithmetic negation), `!` (logical NOT), `~` (bitwise NOT, `not.b32` on `int`).
 - Comparison: `<`, `<=`, `>`, `>=`, `==`, `!=` on `int`/`float`; `==`, `!=` also on two `bool`s.
   Float comparisons follow C: all are false when an operand is NaN, except `!=`, which is true
@@ -161,7 +164,7 @@ Type rules in `Sema`:
 
 Semantics and Type Rules:
 - `ptr`: accepts scalar pointers (`int*`, `float*`), vector pointers (`int2*`, `int4*`, `float2*`, `float4*`), and shared memory arrays (`shared int`, `shared float`, `shared int2`, etc.).
-- `offset`: integer element offset. Addressing scales according to the pointee type of `ptr` (`sizeof(*ptr)`: 4 bytes for scalar buffers, 8 bytes for v2 buffers, 16 bytes for v4 buffers), allowing programmers to seamlessly vectorize raw scalar pointer buffers without pointer casts.
+- `offset`: integer offset counted in whole vectors of the accessed width, like `reinterpret_cast<int4*>(p)[offset]` in CUDA: `load_int4(p, i)` reads `p[4i .. 4i+3]` and `load_int2(p, i)` reads `p[2i .. 2i+1]`, for scalar and vector buffers alike. Every access is therefore naturally aligned (16 bytes for v4, 8 for v2), provided the buffer itself is (`cuMemAlloc` returns 256-byte-aligned memory, and shared arrays are 16-byte aligned). An earlier version counted scalars, so `load_int4(p, 1)` faulted with `CUDA_ERROR_MISALIGNED_ADDRESS`.
 - `val`: matching vector type (`int2`/`int4`/`float2`/`float4`).
 - Intrinsic names are reserved identifiers and cannot be shadowed.
 

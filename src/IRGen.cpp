@@ -330,8 +330,9 @@ void IRGen::emitSharedDecl(const SharedDeclStmt& stmt, IRFunction& fn) {
         symbol = ptxname::shared(fn.name, stmt.name) + "$" + std::to_string(n);
     }
     int width = stmt.elemType.vectorWidth();
-    int align = stmt.elemType.sizeInBytes();
-    if (align == 0) align = 4;
+    // 16-byte alignment for every shared array (at most 12 bytes of padding), so the v4
+    // intrinsics can also be used on scalar arrays like `shared int s[N]`.
+    int align = 16;
     int64_t count = stmt.size * width;
     fn.sharedVars.push_back({symbol, toIRType(stmt.elemType), count, align});
     setVar(stmt.name, 0, Type::makeSharedArray(stmt.elemType.kind), symbol);
@@ -1111,7 +1112,8 @@ std::vector<VReg> IRGen::emitVectorExpr(const Expr& expr, IRFunction& fn) {
                         *vecIntrin == VectorIntrinsic::LoadFloat2);
             AddrSpace space;
             IRType elemType;
-            VReg addrReg = emitVectorIntrinsicAddress(*call->args[0], *call->args[1], fn, space, elemType);
+            VReg addrReg = emitVectorIntrinsicAddress(*call->args[0], *call->args[1], is2 ? 8 : 16,
+                                                      fn, space, elemType);
             int width = is2 ? 2 : 4;
             std::vector<VReg> dsts;
             for (int i = 0; i < width; ++i) dsts.push_back(fn.freshReg(elemType));
@@ -1132,7 +1134,12 @@ std::vector<VReg> IRGen::emitVectorExpr(const Expr& expr, IRFunction& fn) {
     return {};
 }
 
-VReg IRGen::emitVectorIntrinsicAddress(const Expr& baseExpr, const Expr& indexExpr, IRFunction& fn, AddrSpace& space, IRType& elemType) {
+// The offset counts whole vectors of the access width (8 bytes for v2, 16 for v4), as in
+// reinterpret_cast<int4*>(p)[i]. Every access is then naturally aligned whatever the buffer's
+// element type; counting scalars allowed a 16-byte ld.v4 at a 4-byte boundary, which faults
+// with CUDA_ERROR_MISALIGNED_ADDRESS.
+VReg IRGen::emitVectorIntrinsicAddress(const Expr& baseExpr, const Expr& indexExpr, int vectorBytes,
+                                       IRFunction& fn, AddrSpace& space, IRType& elemType) {
     auto* baseIdent = dynamic_cast<const IdentExpr*>(&baseExpr);
     const VarInfo* baseInfo = getVar(baseIdent->name);
     bool isFloat = (baseInfo->type.pointeeKind == Type::Float ||
@@ -1140,9 +1147,7 @@ VReg IRGen::emitVectorIntrinsicAddress(const Expr& baseExpr, const Expr& indexEx
                     baseInfo->type.pointeeKind == Type::Float4);
     elemType = isFloat ? IRType::F32 : IRType::S32;
 
-    Type pointeeType(baseInfo->type.pointeeKind);
-    int scaleBytes = pointeeType.sizeInBytes();
-    if (scaleBytes == 0) scaleBytes = 4;
+    int scaleBytes = vectorBytes;
 
     if (baseInfo->type.isSharedArray()) {
         space = AddrSpace::Shared;
@@ -1336,7 +1341,8 @@ VReg IRGen::emitCallExpr(const CallExpr& expr, IRFunction& fn) {
                     *vecIntrin == VectorIntrinsic::StoreFloat2);
         AddrSpace space;
         IRType elemType;
-        VReg addrReg = emitVectorIntrinsicAddress(*expr.args[0], *expr.args[1], fn, space, elemType);
+        VReg addrReg = emitVectorIntrinsicAddress(*expr.args[0], *expr.args[1], is2 ? 8 : 16,
+                                                  fn, space, elemType);
 
         if (isStore) {
             std::vector<VReg> valRegs = emitVectorExpr(*expr.args[2], fn);

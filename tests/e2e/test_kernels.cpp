@@ -808,6 +808,147 @@ TEST_F(KernelE2ETest, UserNamesCannotCollideWithGeneratedNames) {
 }
 
 // -------------------------------------------------------------
+// Memory ordering under the -O1 instruction scheduler
+// -------------------------------------------------------------
+// The scheduler may only reorder a load and a store when they provably touch different
+// memory. Two pointer parameters can point to the same buffer (as in saxpy(a, y, y, n)), and
+// two accesses to one shared array are the same object, so each store below must stay before
+// the load that follows it.
+TEST_F(KernelE2ETest, SchedulerKeepsStoreBeforeLoadWhenMemoryMayAlias) {
+    const char* src =
+        "func void store_then_read(int* dst, int* src, int* out, int i) {\n"
+        "    dst[i] = 9;\n"
+        "    out[i] = src[i];\n"
+        "}\n"
+        "kernel alias_params(int* a, int* b, int* out) {\n"
+        "    int i = thread_idx;\n"
+        "    a[i] = 42;\n"
+        "    out[i] = b[i];\n"
+        "}\n"
+        "kernel alias_shared(int* out) {\n"
+        "    shared int s[64];\n"
+        "    int t = thread_idx;\n"
+        "    s[t] = t * 3;\n"
+        "    out[t] = s[t];\n"
+        "}\n"
+        "kernel alias_func(int* a, int* out) {\n"
+        "    store_then_read(a, a, out, thread_idx);\n"
+        "}\n";
+    const int n = 32;
+    for (bool optimize : {false, true}) {
+        const char* opt = optimize ? "-O1" : "-O0";
+        std::string ptx = compileSourceToPTX(src, optimize);
+        ASSERT_FALSE(ptx.empty());
+        CUmodule mod = loadPTX(ptx);
+        ASSERT_NE(mod, nullptr) << opt;
+        CUfunction fParams, fShared, fFunc;
+        CHECK_CUDA(cuModuleGetFunction(&fParams, mod, "alias_params"));
+        CHECK_CUDA(cuModuleGetFunction(&fShared, mod, "alias_shared"));
+        CHECK_CUDA(cuModuleGetFunction(&fFunc, mod, "alias_func"));
+
+        std::vector<int> seven(n, 7), out(n, -1);
+        CUdeviceptr d_buf, d_out;
+        CHECK_CUDA(cuMemAlloc(&d_buf, n * sizeof(int)));
+        CHECK_CUDA(cuMemAlloc(&d_out, n * sizeof(int)));
+
+        // Kernel parameters a and b are the same buffer.
+        CHECK_CUDA(cuMemcpyHtoD(d_buf, seven.data(), n * sizeof(int)));
+        void* argsParams[] = { &d_buf, &d_buf, &d_out };
+        CHECK_CUDA(cuLaunchKernel(fParams, 1, 1, 1, n, 1, 1, 0, 0, argsParams, 0));
+        CHECK_CUDA(cuCtxSynchronize());
+        CHECK_CUDA(cuMemcpyDtoH(out.data(), d_out, n * sizeof(int)));
+        for (int i = 0; i < n; ++i) ASSERT_EQ(out[i], 42) << opt << " alias_params lane " << i;
+
+        // One thread writes and then reads the same shared element.
+        void* argsShared[] = { &d_out };
+        CHECK_CUDA(cuLaunchKernel(fShared, 1, 1, 1, n, 1, 1, 0, 0, argsShared, 0));
+        CHECK_CUDA(cuCtxSynchronize());
+        CHECK_CUDA(cuMemcpyDtoH(out.data(), d_out, n * sizeof(int)));
+        for (int i = 0; i < n; ++i) ASSERT_EQ(out[i], 3 * i) << opt << " alias_shared lane " << i;
+
+        // Device-function parameters dst and src are the same buffer.
+        CHECK_CUDA(cuMemcpyHtoD(d_buf, seven.data(), n * sizeof(int)));
+        void* argsFunc[] = { &d_buf, &d_out };
+        CHECK_CUDA(cuLaunchKernel(fFunc, 1, 1, 1, n, 1, 1, 0, 0, argsFunc, 0));
+        CHECK_CUDA(cuCtxSynchronize());
+        CHECK_CUDA(cuMemcpyDtoH(out.data(), d_out, n * sizeof(int)));
+        for (int i = 0; i < n; ++i) ASSERT_EQ(out[i], 9) << opt << " alias_func lane " << i;
+
+        CHECK_CUDA(cuMemFree(d_buf));
+        CHECK_CUDA(cuMemFree(d_out));
+        CHECK_CUDA(cuModuleUnload(mod));
+    }
+}
+
+// -------------------------------------------------------------
+// Vector intrinsic offsets count vectors (so accesses are naturally aligned)
+// -------------------------------------------------------------
+// load_int4(p, i) reads p[4i .. 4i+3], like reinterpret_cast<int4*>(p)[i] in CUDA. An offset
+// counted in scalars made load_int4(p, 1) a 16-byte access at a 4-byte boundary, which faults
+// with CUDA_ERROR_MISALIGNED_ADDRESS. Shared scalar arrays must be 16-byte aligned too.
+TEST_F(KernelE2ETest, VectorIntrinsicOffsetsCountVectors) {
+    const char* src =
+        "kernel vec_offsets(int* p, float* f, int* o) {\n"
+        "    int4 q = load_int4(p, 1);\n"
+        "    int2 r = load_int2(p, 3);\n"
+        "    o[0] = q.x; o[1] = q.y; o[2] = q.z; o[3] = q.w;\n"
+        "    o[4] = r.x; o[5] = r.y;\n"
+        "    store_float4(f, 1, float4(1.0, 2.0, 3.0, 4.0));\n"
+        "}\n"
+        "kernel vec_shared(int* o) {\n"
+        "    shared int pad[1];\n"
+        "    shared int s[16];\n"
+        "    pad[0] = 0;\n"
+        "    s[thread_idx] = thread_idx * 10;\n"
+        "    barrier();\n"
+        "    if (thread_idx == 0) {\n"
+        "        int4 q = load_int4(s, 1);\n"
+        "        o[6] = q.x; o[7] = q.y; o[8] = q.z; o[9] = q.w;\n"
+        "    }\n"
+        "}\n";
+    for (bool optimize : {false, true}) {
+        const char* opt = optimize ? "-O1" : "-O0";
+        std::string ptx = compileSourceToPTX(src, optimize);
+        ASSERT_FALSE(ptx.empty());
+        CUmodule mod = loadPTX(ptx);
+        ASSERT_NE(mod, nullptr) << opt;
+        CUfunction fGlobal, fShared;
+        CHECK_CUDA(cuModuleGetFunction(&fGlobal, mod, "vec_offsets"));
+        CHECK_CUDA(cuModuleGetFunction(&fShared, mod, "vec_shared"));
+
+        std::vector<int> h_p(16), h_o(10, -1);
+        for (int k = 0; k < 16; ++k) h_p[k] = k;
+        std::vector<float> h_f(12, -1.0f);
+        CUdeviceptr d_p, d_f, d_o;
+        CHECK_CUDA(cuMemAlloc(&d_p, h_p.size() * sizeof(int)));
+        CHECK_CUDA(cuMemAlloc(&d_f, h_f.size() * sizeof(float)));
+        CHECK_CUDA(cuMemAlloc(&d_o, h_o.size() * sizeof(int)));
+        CHECK_CUDA(cuMemcpyHtoD(d_p, h_p.data(), h_p.size() * sizeof(int)));
+        CHECK_CUDA(cuMemcpyHtoD(d_f, h_f.data(), h_f.size() * sizeof(float)));
+        CHECK_CUDA(cuMemcpyHtoD(d_o, h_o.data(), h_o.size() * sizeof(int)));
+
+        void* argsGlobal[] = { &d_p, &d_f, &d_o };
+        CHECK_CUDA(cuLaunchKernel(fGlobal, 1, 1, 1, 1, 1, 1, 0, 0, argsGlobal, 0));
+        CHECK_CUDA(cuCtxSynchronize());
+        void* argsShared[] = { &d_o };
+        CHECK_CUDA(cuLaunchKernel(fShared, 1, 1, 1, 16, 1, 1, 0, 0, argsShared, 0));
+        CHECK_CUDA(cuCtxSynchronize());
+        CHECK_CUDA(cuMemcpyDtoH(h_o.data(), d_o, h_o.size() * sizeof(int)));
+        CHECK_CUDA(cuMemcpyDtoH(h_f.data(), d_f, h_f.size() * sizeof(float)));
+
+        const int wantO[10] = {4, 5, 6, 7, 6, 7, 40, 50, 60, 70};
+        for (int k = 0; k < 10; ++k) EXPECT_EQ(h_o[k], wantO[k]) << opt << " o[" << k << "]";
+        const float wantF[12] = {-1, -1, -1, -1, 1, 2, 3, 4, -1, -1, -1, -1};
+        for (int k = 0; k < 12; ++k) EXPECT_EQ(h_f[k], wantF[k]) << opt << " f[" << k << "]";
+
+        CHECK_CUDA(cuMemFree(d_p));
+        CHECK_CUDA(cuMemFree(d_f));
+        CHECK_CUDA(cuMemFree(d_o));
+        CHECK_CUDA(cuModuleUnload(mod));
+    }
+}
+
+// -------------------------------------------------------------
 // Line info
 // -------------------------------------------------------------
 // PTX with .file/.loc must JIT with CU_JIT_GENERATE_LINE_INFO and still compute correctly.
@@ -875,12 +1016,20 @@ static std::vector<int32_t> runFoldEdges(KernelE2ETest* fixture, bool optimize) 
         "    o[10] = cast<int>(2147483520.0);\n"
         "    o[11] = 7 / -2;\n"
         "    o[12] = -7 % 3;\n"
+        // PTX clamps shift counts >= 32 (unsigned, so negative counts too) to 32.
+        "    o[13] = 1 << 32;\n"
+        "    o[14] = 1000 >> 40;\n"
+        "    o[15] = 1 << -1;\n"
+        "    o[16] = -8 >> 40;\n"
+        "    o[17] = 1 << 31;\n"
+        "    o[18] = -8 >> 1;\n"
+        "    o[19] = 7 << 33;\n"
         "    f[0] = 0.1 + 0.2;\n"
         "    f[1] = 1.0 / 3.0;\n"
         "    f[2] = cast<float>(16777217);\n"
         "    f[3] = -0.0 - 0.0;\n"
         "}\n";
-    const int numInts = 13, numFloats = 4;
+    const int numInts = 20, numFloats = 4;
 
     std::vector<int32_t> result;
     std::string ptx = compileSourceToPTX(src, optimize);
@@ -1791,7 +1940,8 @@ TEST_F(KernelE2ETest, VectorMemoryOperationsMatchCpu) {
         "kernel test_raw_buffer_intrinsics(int* raw_i_in, int* raw_i_out, float* raw_f_in, float* raw_f_out, int n) {\n"
         "    int i = block_idx * block_dim + thread_idx;\n"
         "    if (i < n) {\n"
-        "        int offset4 = i * 4;\n"
+        // Offsets count whole vectors: load_int4(p, i) reads p[4i .. 4i+3].
+        "        int offset4 = i;\n"
         "        int4 vi4 = load_int4(raw_i_in, offset4);\n"
         "        vi4.x = vi4.x + 11;\n"
         "        vi4.y = vi4.y + 22;\n"
@@ -1799,11 +1949,11 @@ TEST_F(KernelE2ETest, VectorMemoryOperationsMatchCpu) {
         "        vi4.w = vi4.w + 44;\n"
         "        store_int4(raw_i_out, offset4, vi4);\n"
         "\n"
-        "        int offset2 = i * 2;\n"
+        "        int offset2 = i;\n"
         "        int2 vi2 = load_int2(raw_i_in, offset2);\n"
         "        vi2.x = vi2.x + 100;\n"
         "        vi2.y = vi2.y + 200;\n"
-        "        store_int2(raw_i_out, n * 4 + offset2, vi2);\n"
+        "        store_int2(raw_i_out, n * 2 + offset2, vi2);\n"
         "\n"
         "        float4 vf4 = load_float4(raw_f_in, offset4);\n"
         "        vf4.x = vf4.x * 2.0;\n"
@@ -1815,7 +1965,7 @@ TEST_F(KernelE2ETest, VectorMemoryOperationsMatchCpu) {
         "        float2 vf2 = load_float2(raw_f_in, offset2);\n"
         "        vf2.x = vf2.x + 1.5;\n"
         "        vf2.y = vf2.y + 2.5;\n"
-        "        store_float2(raw_f_out, n * 4 + offset2, vf2);\n"
+        "        store_float2(raw_f_out, n * 2 + offset2, vf2);\n"
         "    }\n"
         "}\n";
 

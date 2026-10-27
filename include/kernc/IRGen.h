@@ -53,7 +53,8 @@ private:
     // Address of base[index]; sets `space` and `elemType` for the Load/Store that uses it.
     VReg emitElementAddress(const IndexExpr& idx, IRFunction& fn, AddrSpace& space, IRType& elemType);
     VReg emitMemoryAddress(const Expr& baseExpr, const Expr* indexExpr, IRFunction& fn, AddrSpace& space, IRType& elemType);
-    VReg emitVectorIntrinsicAddress(const Expr& baseExpr, const Expr& indexExpr, IRFunction& fn, AddrSpace& space, IRType& elemType);
+    VReg emitVectorIntrinsicAddress(const Expr& baseExpr, const Expr& indexExpr, int vectorBytes,
+                                    IRFunction& fn, AddrSpace& space, IRType& elemType);
 
     struct VarInfo {
         VReg reg = 0;             // 0 for shared arrays and vector variables

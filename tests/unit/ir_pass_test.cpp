@@ -243,6 +243,47 @@ TEST(IRPassTest, FoldSignedArithmeticWrapsLikeS32) {
     EXPECT_EQ(v[3], INT32_MIN);
 }
 
+TEST(IRPassTest, FoldShiftsClampCountLikePTX) {
+    // shl.b32 / shr.s32 clamp a shift count >= 32 (read as unsigned, so negative counts too)
+    // to 32: left shift gives 0, arithmetic right shift gives all sign bits. Masking the
+    // count to 5 bits (x86 behaviour) would differ from the GPU.
+    auto v = storedConstants("kernel t(int* o) {\n"
+                             "    o[0] = 1 << 32;\n"
+                             "    o[1] = 1000 >> 40;\n"
+                             "    o[2] = 1 << -1;\n"
+                             "    o[3] = -8 >> 40;\n"
+                             "    o[4] = 1 << 31;\n"
+                             "    o[5] = -8 >> 1;\n"
+                             "}\n");
+    ASSERT_EQ(v.size(), 6u);
+    EXPECT_EQ(v[0], 0);
+    EXPECT_EQ(v[1], 0);
+    EXPECT_EQ(v[2], 0);
+    EXPECT_EQ(v[3], -1);
+    EXPECT_EQ(v[4], INT32_MIN);
+    EXPECT_EQ(v[5], -4);
+}
+
+TEST(IRPassTest, FoldUnsignedShiftRightClampsLikePTX) {
+    // shr.u32 (used by strength reduction) also clamps: a count >= 32 gives 0.
+    IRFunction fn;
+    VReg x = fn.freshReg(IRType::S32);
+    VReg n = fn.freshReg(IRType::S32);
+    VReg r = fn.freshReg(IRType::S32);
+    IRInst lx{IROp::LoadImm, x, 0, 0, IRType::S32};
+    lx.immInt = -1;
+    IRInst ln{IROp::LoadImm, n, 0, 0, IRType::S32};
+    ln.immInt = 33;
+    fn.emit(lx);
+    fn.emit(ln);
+    fn.emit(IRInst{IROp::ShrU32, r, x, n, IRType::S32});
+
+    Optimizer::runConstantFolding(fn);
+    const IRInst& shr = fn.blocks[0].instructions[2];
+    ASSERT_EQ(shr.op, IROp::LoadImm);
+    EXPECT_EQ(shr.immInt, 0);
+}
+
 TEST(IRPassTest, FoldLeavesIntMinDivideByMinusOneToHardware) {
     // INT_MIN / -1 overflows; div.s32/rem.s32 leave the result unspecified, so the
     // folder must not invent one.
@@ -335,7 +376,7 @@ TEST(IRPassTest, SharedArrayLowersToSharedStateSpace) {
     std::string ptx = PTXEmitter().emitFunction(fn);
 
     // Declared at module scope, before the entry, with a per-kernel name (like nvcc).
-    size_t decl = ptx.find(".shared .align 4 .f32 t$buf[128];");
+    size_t decl = ptx.find(".shared .align 16 .f32 t$buf[128];");
     ASSERT_NE(decl, std::string::npos) << ptx;
     EXPECT_LT(decl, ptx.find(".visible .entry t")) << ptx;
     EXPECT_NE(ptx.find("bar.sync 0;"), std::string::npos) << ptx;
@@ -478,6 +519,46 @@ TEST(IRPassTest, DeviceFunctionPTXShape) {
     std::string storeBody = ptx.substr(body, ptx.find("\n}", body) - body);
     EXPECT_EQ(storeBody.find("cvta"), std::string::npos) << storeBody;
     EXPECT_NE(storeBody.find("st.global.f32"), std::string::npos) << storeBody;
+}
+
+// Position (in program order across blocks) of the first instruction with this opcode, or -1.
+static int firstIndexOf(const IRFunction& fn, IROp op) {
+    int index = 0;
+    for (const auto& bb : fn.blocks)
+        for (const auto& inst : bb.instructions) {
+            if (inst.op == op) return index;
+            ++index;
+        }
+    return -1;
+}
+
+TEST(IRPassTest, SchedulerKeepsStoreBeforeLoadThroughDifferentPointerParams) {
+    // a and b may point to the same buffer, so the load of b[i] must not move above a[i] = 42.
+    auto fn = compileToIR("kernel k(int* a, int* b, int* out) {\n"
+                          "    a[thread_idx] = 42;\n"
+                          "    out[thread_idx] = b[thread_idx];\n"
+                          "}\n");
+    Optimizer::runPasses(fn);
+    int store = firstIndexOf(fn, IROp::Store);
+    int load = firstIndexOf(fn, IROp::Load);
+    ASSERT_GE(store, 0) << fn.dump();
+    ASSERT_GE(load, 0) << fn.dump();
+    EXPECT_LT(store, load) << fn.dump();
+}
+
+TEST(IRPassTest, SchedulerKeepsStoreBeforeLoadOfSameSharedArray) {
+    // Each access computes its own shared base register, but both name the same array.
+    auto fn = compileToIR("kernel k(int* out) {\n"
+                          "    shared int s[64];\n"
+                          "    s[thread_idx] = thread_idx * 3;\n"
+                          "    out[thread_idx] = s[thread_idx];\n"
+                          "}\n");
+    Optimizer::runPasses(fn);
+    int store = firstIndexOf(fn, IROp::Store);
+    int load = firstIndexOf(fn, IROp::Load);
+    ASSERT_GE(store, 0) << fn.dump();
+    ASSERT_GE(load, 0) << fn.dump();
+    EXPECT_LT(store, load) << fn.dump();
 }
 
 TEST(IRPassTest, PTXEmissionValidStructure) {
@@ -748,7 +829,7 @@ TEST(IRPassTest, VectorLoadStoreIROpsAndPTX) {
     PTXEmitter emitter;
     std::string ptx = emitter.emitModule(mod);
     EXPECT_NE(ptx.find(".shared .align 16 .s32 test$s_i[128];"), std::string::npos) << ptx;
-    EXPECT_NE(ptx.find(".shared .align 8 .f32 test$s_f[128];"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find(".shared .align 16 .f32 test$s_f[128];"), std::string::npos) << ptx;
     EXPECT_NE(ptx.find("ld.global.v4.s32"), std::string::npos) << ptx;
     EXPECT_NE(ptx.find("st.shared.v4.s32"), std::string::npos) << ptx;
     EXPECT_NE(ptx.find("ld.shared.v4.s32"), std::string::npos) << ptx;
@@ -850,16 +931,21 @@ TEST(IRPassTest, LoopUnrollingNonConstantOrLargeTripCountPreserved) {
 }
 
 TEST(IRPassTest, InstructionSchedulingHoistsLoadsBeforeAluAndStores) {
+    // Loads may only move above stores to provably different memory. Two different shared
+    // arrays are such a case (two global pointers are not: they may alias), so here all loads
+    // of sa can be hoisted above the stores to sb to hide latency.
     std::string src =
-        "kernel test(int* a, int* b) {\n"
+        "kernel test(int* out) {\n"
+        "    shared int sa[4];\n"
+        "    shared int sb[4];\n"
         "    for (int i = 0; i < 4; i = i + 1) {\n"
-        "        b[i] = a[i] * 2;\n"
+        "        sb[i] = sa[i] * 2;\n"
         "    }\n"
         "}\n";
     auto fn = compileToIR(src);
     Optimizer::runPasses(fn);
 
-    // In the scheduled block, verify that independent global loads are hoisted
+    // In the scheduled block, verify that the independent loads are hoisted
     // before the store instructions
     ASSERT_EQ(fn.blocks.size(), 1);
     const auto& insts = fn.blocks[0].instructions;
