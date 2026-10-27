@@ -56,6 +56,10 @@ const char* irOpToString(IROp op) {
         case IROp::LoadParam:  return "ldparam";
         case IROp::Load:       return "load";
         case IROp::Store:      return "store";
+        case IROp::LoadV2:     return "load.v2";
+        case IROp::LoadV4:     return "load.v4";
+        case IROp::StoreV2:    return "store.v2";
+        case IROp::StoreV4:    return "store.v4";
         case IROp::MulWide:    return "mul.wide";
         case IROp::AddS64:     return "add.s64";
         case IROp::CvtaGlobal: return "cvta.to.global";
@@ -91,6 +95,10 @@ std::string IRInst::toString() const {
     ss << irOpToString(op) << " ";
     if (dst != 0) {
         ss << "%v" << dst << ":" << irTypeToString(type) << " = ";
+    } else if (!dsts.empty()) {
+        ss << "{";
+        for (size_t i = 0; i < dsts.size(); ++i) ss << (i ? ", " : "") << "%v" << dsts[i];
+        ss << "} = ";
     }
     switch (op) {
         case IROp::LoadImm:
@@ -113,6 +121,17 @@ std::string IRInst::toString() const {
             ss << (space == AddrSpace::Shared ? "shared" : "global") << " [%v" << src1 << "], %v" << src2;
             break;
         case IROp::Load:
+            ss << (space == AddrSpace::Shared ? "shared" : "global") << " [%v" << src1 << "]";
+            break;
+        case IROp::StoreV2:
+        case IROp::StoreV4: {
+            ss << (space == AddrSpace::Shared ? "shared" : "global") << " [%v" << src1 << "], {";
+            for (size_t i = 0; i < args.size(); ++i) ss << (i ? ", " : "") << "%v" << args[i];
+            ss << "}";
+            break;
+        }
+        case IROp::LoadV2:
+        case IROp::LoadV4:
             ss << (space == AddrSpace::Shared ? "shared" : "global") << " [%v" << src1 << "]";
             break;
         case IROp::SharedAddr:

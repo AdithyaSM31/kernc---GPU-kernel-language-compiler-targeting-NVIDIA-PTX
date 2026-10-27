@@ -1742,6 +1742,312 @@ TEST_F(KernelE2ETest, AtomicOperationsMatchCpu) {
     }
 }
 
+TEST_F(KernelE2ETest, VectorMemoryOperationsMatchCpu) {
+    struct TestInt2 { int32_t x, y; };
+    struct TestInt4 { int32_t x, y, z, w; };
+    struct TestFloat2 { float x, y; };
+    struct TestFloat4 { float x, y, z, w; };
+
+    std::string src =
+        "kernel test_saxpy_v4(float4* x, float4* y, float a, int n) {\n"
+        "    int i = block_idx * block_dim + thread_idx;\n"
+        "    if (i < n) {\n"
+        "        float4 vx = x[i];\n"
+        "        float4 vy = y[i];\n"
+        "        y[i] = float4(a * vx.x + vy.x, a * vx.y + vy.y, a * vx.z + vy.z, a * vx.w + vy.w);\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "kernel test_shared_reverse_v(int4* in4, int4* out4, int2* in2, int2* out2, int n) {\n"
+        "    shared int4 s4[64];\n"
+        "    shared int2 s2[64];\n"
+        "    int tid = thread_idx;\n"
+        "    int gid = block_idx * block_dim + thread_idx;\n"
+        "    if (gid < n) {\n"
+        "        s4[tid] = in4[gid];\n"
+        "        s2[tid] = in2[gid];\n"
+        "    }\n"
+        "    barrier();\n"
+        "    if (gid < n) {\n"
+        "        out4[gid] = s4[63 - tid];\n"
+        "        out2[gid] = s2[63 - tid];\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "kernel test_component_mutation(int4* in, int4* out, int n) {\n"
+        "    int i = block_idx * block_dim + thread_idx;\n"
+        "    if (i < n) {\n"
+        "        int4 v = in[i];\n"
+        "        v.x = v.x + 10;\n"
+        "        v.y = v.y + 20;\n"
+        "        v.z = v.z + 30;\n"
+        "        v.w = v.w * 2;\n"
+        "        out[i] = v;\n"
+        "        out[i].y = out[i].y + 500;\n"
+        "        out[i].w = out[i].w + 1000;\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "kernel test_raw_buffer_intrinsics(int* raw_i_in, int* raw_i_out, float* raw_f_in, float* raw_f_out, int n) {\n"
+        "    int i = block_idx * block_dim + thread_idx;\n"
+        "    if (i < n) {\n"
+        "        int offset4 = i * 4;\n"
+        "        int4 vi4 = load_int4(raw_i_in, offset4);\n"
+        "        vi4.x = vi4.x + 11;\n"
+        "        vi4.y = vi4.y + 22;\n"
+        "        vi4.z = vi4.z + 33;\n"
+        "        vi4.w = vi4.w + 44;\n"
+        "        store_int4(raw_i_out, offset4, vi4);\n"
+        "\n"
+        "        int offset2 = i * 2;\n"
+        "        int2 vi2 = load_int2(raw_i_in, offset2);\n"
+        "        vi2.x = vi2.x + 100;\n"
+        "        vi2.y = vi2.y + 200;\n"
+        "        store_int2(raw_i_out, n * 4 + offset2, vi2);\n"
+        "\n"
+        "        float4 vf4 = load_float4(raw_f_in, offset4);\n"
+        "        vf4.x = vf4.x * 2.0;\n"
+        "        vf4.y = vf4.y * 3.0;\n"
+        "        vf4.z = vf4.z * 4.0;\n"
+        "        vf4.w = vf4.w * 5.0;\n"
+        "        store_float4(raw_f_out, offset4, vf4);\n"
+        "\n"
+        "        float2 vf2 = load_float2(raw_f_in, offset2);\n"
+        "        vf2.x = vf2.x + 1.5;\n"
+        "        vf2.y = vf2.y + 2.5;\n"
+        "        store_float2(raw_f_out, n * 4 + offset2, vf2);\n"
+        "    }\n"
+        "}\n";
+
+    constexpr int N = 256;
+    constexpr int kBlockSize = 64;
+    constexpr int kGridSize = N / kBlockSize; // 4 blocks
+
+    for (bool optimize : {false, true}) {
+        std::string optName = optimize ? "-O1" : "-O0";
+        std::string ptx = compileSourceToPTX(src, optimize);
+        ASSERT_FALSE(ptx.empty()) << optName;
+
+        CUmodule mod = loadPTX(ptx);
+        ASSERT_NE(mod, nullptr) << optName;
+
+        // =========================================================
+        // 1. Vector SAXPY float4
+        // =========================================================
+        {
+            CUfunction func;
+            CHECK_CUDA(cuModuleGetFunction(&func, mod, "test_saxpy_v4"));
+
+            std::vector<TestFloat4> h_x(N), h_y(N), h_y_ref(N);
+            float a = 2.5f;
+            for (int i = 0; i < N; ++i) {
+                h_x[i] = { i * 1.5f, i * -0.5f, (i + 1) * 2.0f, (i + 2) * 0.25f };
+                h_y[i] = { (i + 3) * 0.75f, (i + 4) * 1.25f, (i + 5) * -1.0f, (i + 6) * 3.5f };
+                h_y_ref[i] = {
+                    a * h_x[i].x + h_y[i].x,
+                    a * h_x[i].y + h_y[i].y,
+                    a * h_x[i].z + h_y[i].z,
+                    a * h_x[i].w + h_y[i].w
+                };
+            }
+
+            CUdeviceptr d_x, d_y;
+            size_t bytesF4 = N * sizeof(TestFloat4);
+            CHECK_CUDA(cuMemAlloc(&d_x, bytesF4));
+            CHECK_CUDA(cuMemAlloc(&d_y, bytesF4));
+            CHECK_CUDA(cuMemcpyHtoD(d_x, h_x.data(), bytesF4));
+            CHECK_CUDA(cuMemcpyHtoD(d_y, h_y.data(), bytesF4));
+
+            int n_arg = N;
+            void* args[] = { &d_x, &d_y, &a, &n_arg };
+            CHECK_CUDA(cuLaunchKernel(func, kGridSize, 1, 1, kBlockSize, 1, 1, 0, 0, args, 0));
+            CHECK_CUDA(cuCtxSynchronize());
+
+            CHECK_CUDA(cuMemcpyDtoH(h_y.data(), d_y, bytesF4));
+            for (int i = 0; i < N; ++i) {
+                EXPECT_FLOAT_EQ(h_y[i].x, h_y_ref[i].x) << optName << " SAXPY x at " << i;
+                EXPECT_FLOAT_EQ(h_y[i].y, h_y_ref[i].y) << optName << " SAXPY y at " << i;
+                EXPECT_FLOAT_EQ(h_y[i].z, h_y_ref[i].z) << optName << " SAXPY z at " << i;
+                EXPECT_FLOAT_EQ(h_y[i].w, h_y_ref[i].w) << optName << " SAXPY w at " << i;
+            }
+
+            CHECK_CUDA(cuMemFree(d_x));
+            CHECK_CUDA(cuMemFree(d_y));
+        }
+
+        // =========================================================
+        // 2. Vector shared memory reverse (int4 and int2)
+        // =========================================================
+        {
+            CUfunction func;
+            CHECK_CUDA(cuModuleGetFunction(&func, mod, "test_shared_reverse_v"));
+
+            std::vector<TestInt4> h_in4(N), h_out4(N), h_ref4(N);
+            std::vector<TestInt2> h_in2(N), h_out2(N), h_ref2(N);
+            for (int i = 0; i < N; ++i) {
+                h_in4[i] = { i * 4 + 1, i * 4 + 2, i * 4 + 3, i * 4 + 4 };
+                h_in2[i] = { i * 2 + 10, i * 2 + 20 };
+            }
+            for (int b = 0; b < kGridSize; ++b) {
+                for (int t = 0; t < kBlockSize; ++t) {
+                    int gid = b * kBlockSize + t;
+                    int rev_gid = b * kBlockSize + (kBlockSize - 1 - t);
+                    h_ref4[gid] = h_in4[rev_gid];
+                    h_ref2[gid] = h_in2[rev_gid];
+                }
+            }
+
+            CUdeviceptr d_in4, d_out4, d_in2, d_out2;
+            size_t bytesI4 = N * sizeof(TestInt4);
+            size_t bytesI2 = N * sizeof(TestInt2);
+            CHECK_CUDA(cuMemAlloc(&d_in4, bytesI4));
+            CHECK_CUDA(cuMemAlloc(&d_out4, bytesI4));
+            CHECK_CUDA(cuMemAlloc(&d_in2, bytesI2));
+            CHECK_CUDA(cuMemAlloc(&d_out2, bytesI2));
+
+            CHECK_CUDA(cuMemcpyHtoD(d_in4, h_in4.data(), bytesI4));
+            CHECK_CUDA(cuMemcpyHtoD(d_in2, h_in2.data(), bytesI2));
+
+            int n_arg = N;
+            void* args[] = { &d_in4, &d_out4, &d_in2, &d_out2, &n_arg };
+            CHECK_CUDA(cuLaunchKernel(func, kGridSize, 1, 1, kBlockSize, 1, 1, 0, 0, args, 0));
+            CHECK_CUDA(cuCtxSynchronize());
+
+            CHECK_CUDA(cuMemcpyDtoH(h_out4.data(), d_out4, bytesI4));
+            CHECK_CUDA(cuMemcpyDtoH(h_out2.data(), d_out2, bytesI2));
+
+            for (int i = 0; i < N; ++i) {
+                EXPECT_EQ(h_out4[i].x, h_ref4[i].x) << optName << " shared reverse int4.x at " << i;
+                EXPECT_EQ(h_out4[i].y, h_ref4[i].y) << optName << " shared reverse int4.y at " << i;
+                EXPECT_EQ(h_out4[i].z, h_ref4[i].z) << optName << " shared reverse int4.z at " << i;
+                EXPECT_EQ(h_out4[i].w, h_ref4[i].w) << optName << " shared reverse int4.w at " << i;
+
+                EXPECT_EQ(h_out2[i].x, h_ref2[i].x) << optName << " shared reverse int2.x at " << i;
+                EXPECT_EQ(h_out2[i].y, h_ref2[i].y) << optName << " shared reverse int2.y at " << i;
+            }
+
+            CHECK_CUDA(cuMemFree(d_in4));
+            CHECK_CUDA(cuMemFree(d_out4));
+            CHECK_CUDA(cuMemFree(d_in2));
+            CHECK_CUDA(cuMemFree(d_out2));
+        }
+
+        // =========================================================
+        // 3. Component arithmetic and mutation
+        // =========================================================
+        {
+            CUfunction func;
+            CHECK_CUDA(cuModuleGetFunction(&func, mod, "test_component_mutation"));
+
+            std::vector<TestInt4> h_mut_in(N), h_mut_out(N), h_mut_ref(N);
+            for (int i = 0; i < N; ++i) {
+                h_mut_in[i] = { i * 10, i * 20, i * 30, i * 40 };
+                h_mut_ref[i] = {
+                    h_mut_in[i].x + 10,
+                    h_mut_in[i].y + 20 + 500,
+                    h_mut_in[i].z + 30,
+                    (h_mut_in[i].w * 2) + 1000
+                };
+            }
+
+            CUdeviceptr d_in, d_out;
+            size_t bytesI4 = N * sizeof(TestInt4);
+            CHECK_CUDA(cuMemAlloc(&d_in, bytesI4));
+            CHECK_CUDA(cuMemAlloc(&d_out, bytesI4));
+
+            CHECK_CUDA(cuMemcpyHtoD(d_in, h_mut_in.data(), bytesI4));
+
+            int n_arg = N;
+            void* args[] = { &d_in, &d_out, &n_arg };
+            CHECK_CUDA(cuLaunchKernel(func, kGridSize, 1, 1, kBlockSize, 1, 1, 0, 0, args, 0));
+            CHECK_CUDA(cuCtxSynchronize());
+
+            CHECK_CUDA(cuMemcpyDtoH(h_mut_out.data(), d_out, bytesI4));
+
+            for (int i = 0; i < N; ++i) {
+                EXPECT_EQ(h_mut_out[i].x, h_mut_ref[i].x) << optName << " mutation x at " << i;
+                EXPECT_EQ(h_mut_out[i].y, h_mut_ref[i].y) << optName << " mutation y at " << i;
+                EXPECT_EQ(h_mut_out[i].z, h_mut_ref[i].z) << optName << " mutation z at " << i;
+                EXPECT_EQ(h_mut_out[i].w, h_mut_ref[i].w) << optName << " mutation w at " << i;
+            }
+
+            CHECK_CUDA(cuMemFree(d_in));
+            CHECK_CUDA(cuMemFree(d_out));
+        }
+
+        // =========================================================
+        // 4. Raw scalar buffer vector loading/storing
+        // =========================================================
+        {
+            CUfunction func;
+            CHECK_CUDA(cuModuleGetFunction(&func, mod, "test_raw_buffer_intrinsics"));
+
+            size_t totalInts = N * 4 + N * 2;
+            size_t totalFloats = N * 4 + N * 2;
+            std::vector<int32_t> h_raw_i_in(totalInts), h_raw_i_out(totalInts, 0), h_raw_i_ref(totalInts, 0);
+            std::vector<float> h_raw_f_in(totalFloats), h_raw_f_out(totalFloats, 0.0f), h_raw_f_ref(totalFloats, 0.0f);
+
+            for (size_t i = 0; i < totalInts; ++i) {
+                h_raw_i_in[i] = static_cast<int32_t>(i * 3 + 7);
+            }
+            for (size_t i = 0; i < totalFloats; ++i) {
+                h_raw_f_in[i] = static_cast<float>(i) * 0.5f + 1.25f;
+            }
+
+            for (int i = 0; i < N; ++i) {
+                int off4 = i * 4;
+                h_raw_i_ref[off4 + 0] = h_raw_i_in[off4 + 0] + 11;
+                h_raw_i_ref[off4 + 1] = h_raw_i_in[off4 + 1] + 22;
+                h_raw_i_ref[off4 + 2] = h_raw_i_in[off4 + 2] + 33;
+                h_raw_i_ref[off4 + 3] = h_raw_i_in[off4 + 3] + 44;
+
+                int off2 = i * 2;
+                h_raw_i_ref[N * 4 + off2 + 0] = h_raw_i_in[off2 + 0] + 100;
+                h_raw_i_ref[N * 4 + off2 + 1] = h_raw_i_in[off2 + 1] + 200;
+
+                h_raw_f_ref[off4 + 0] = h_raw_f_in[off4 + 0] * 2.0f;
+                h_raw_f_ref[off4 + 1] = h_raw_f_in[off4 + 1] * 3.0f;
+                h_raw_f_ref[off4 + 2] = h_raw_f_in[off4 + 2] * 4.0f;
+                h_raw_f_ref[off4 + 3] = h_raw_f_in[off4 + 3] * 5.0f;
+
+                h_raw_f_ref[N * 4 + off2 + 0] = h_raw_f_in[off2 + 0] + 1.5f;
+                h_raw_f_ref[N * 4 + off2 + 1] = h_raw_f_in[off2 + 1] + 2.5f;
+            }
+
+            CUdeviceptr d_raw_i_in, d_raw_i_out, d_raw_f_in, d_raw_f_out;
+            CHECK_CUDA(cuMemAlloc(&d_raw_i_in, totalInts * sizeof(int32_t)));
+            CHECK_CUDA(cuMemAlloc(&d_raw_i_out, totalInts * sizeof(int32_t)));
+            CHECK_CUDA(cuMemAlloc(&d_raw_f_in, totalFloats * sizeof(float)));
+            CHECK_CUDA(cuMemAlloc(&d_raw_f_out, totalFloats * sizeof(float)));
+
+            CHECK_CUDA(cuMemcpyHtoD(d_raw_i_in, h_raw_i_in.data(), totalInts * sizeof(int32_t)));
+            CHECK_CUDA(cuMemcpyHtoD(d_raw_f_in, h_raw_f_in.data(), totalFloats * sizeof(float)));
+
+            int n_arg = N;
+            void* args[] = { &d_raw_i_in, &d_raw_i_out, &d_raw_f_in, &d_raw_f_out, &n_arg };
+            CHECK_CUDA(cuLaunchKernel(func, kGridSize, 1, 1, kBlockSize, 1, 1, 0, 0, args, 0));
+            CHECK_CUDA(cuCtxSynchronize());
+
+            CHECK_CUDA(cuMemcpyDtoH(h_raw_i_out.data(), d_raw_i_out, totalInts * sizeof(int32_t)));
+            CHECK_CUDA(cuMemcpyDtoH(h_raw_f_out.data(), d_raw_f_out, totalFloats * sizeof(float)));
+
+            for (size_t i = 0; i < totalInts; ++i) {
+                EXPECT_EQ(h_raw_i_out[i], h_raw_i_ref[i]) << optName << " raw int at " << i;
+            }
+            for (size_t i = 0; i < totalFloats; ++i) {
+                EXPECT_FLOAT_EQ(h_raw_f_out[i], h_raw_f_ref[i]) << optName << " raw float at " << i;
+            }
+
+            CHECK_CUDA(cuMemFree(d_raw_i_in));
+            CHECK_CUDA(cuMemFree(d_raw_i_out));
+            CHECK_CUDA(cuMemFree(d_raw_f_in));
+            CHECK_CUDA(cuMemFree(d_raw_f_out));
+        }
+
+        CHECK_CUDA(cuModuleUnload(mod));
+    }
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     ::testing::AddGlobalTestEnvironment(new CudaEnvironment);

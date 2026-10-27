@@ -5,10 +5,14 @@ namespace kernc {
 // Maps a source-language type to the IR register type that holds its values.
 static IRType toIRType(const Type& t) {
     switch (t.kind) {
-        case Type::Float: return IRType::F32;
+        case Type::Float:
+        case Type::Float2:
+        case Type::Float4: return IRType::F32;
         case Type::Ptr:   return IRType::S64;
         case Type::Bool:  return IRType::Pred;
         case Type::Int:
+        case Type::Int2:
+        case Type::Int4:
         case Type::Void:  break;
         case Type::SharedArray: break; // lives in memory, never in a register
     }
@@ -172,6 +176,24 @@ void IRGen::emitStmtBody(const Stmt& stmt, IRFunction& fn) {
 }
 
 void IRGen::emitVarDecl(const VarDeclStmt& stmt, IRFunction& fn) {
+    if (stmt.type.isVector()) {
+        int width = stmt.type.vectorWidth();
+        IRType elemTy = stmt.type.isFloatVector() ? IRType::F32 : IRType::S32;
+        std::vector<VReg> regs;
+        for (int i = 0; i < width; ++i) {
+            regs.push_back(fn.freshReg(elemTy));
+        }
+        setVar(stmt.name, 0, stmt.type, "", regs);
+
+        if (stmt.init) {
+            std::vector<VReg> initRegs = emitVectorExpr(*stmt.init, fn);
+            for (int i = 0; i < width && i < static_cast<int>(initRegs.size()); ++i) {
+                fn.emit(IRInst{IROp::Mov, regs[i], initRegs[i], 0, elemTy});
+            }
+        }
+        return;
+    }
+
     VReg varReg = fn.freshReg(toIRType(stmt.type));
     setVar(stmt.name, varReg, stmt.type);
 
@@ -189,6 +211,14 @@ void IRGen::emitVarDecl(const VarDeclStmt& stmt, IRFunction& fn) {
 void IRGen::emitAssign(const AssignStmt& stmt, IRFunction& fn) {
     if (auto* ident = dynamic_cast<const IdentExpr*>(stmt.target.get())) {
         const VarInfo* vInfo = getVar(ident->name);
+        if (vInfo->type.isVector()) {
+            std::vector<VReg> valRegs = emitVectorExpr(*stmt.value, fn);
+            IRType elemTy = vInfo->type.isFloatVector() ? IRType::F32 : IRType::S32;
+            for (size_t i = 0; i < vInfo->regs.size() && i < valRegs.size(); ++i) {
+                fn.emit(IRInst{IROp::Mov, vInfo->regs[i], valRegs[i], 0, elemTy});
+            }
+            return;
+        }
         VReg valReg = emitExpr(*stmt.value, fn);
         if (vInfo->type.isFloat() && stmt.value->resolvedType.isInt()) {
             VReg cvtReg = fn.freshReg(IRType::F32);
@@ -196,10 +226,86 @@ void IRGen::emitAssign(const AssignStmt& stmt, IRFunction& fn) {
             valReg = cvtReg;
         }
         fn.emit(IRInst{IROp::Mov, vInfo->reg, valReg, 0, toIRType(vInfo->type)});
+    } else if (auto* mem = dynamic_cast<const MemberExpr*>(stmt.target.get())) {
+        int compIdx = 0;
+        if (mem->member == "x") compIdx = 0;
+        else if (mem->member == "y") compIdx = 1;
+        else if (mem->member == "z") compIdx = 2;
+        else if (mem->member == "w") compIdx = 3;
+
+        if (auto* baseIdent = dynamic_cast<const IdentExpr*>(mem->base.get())) {
+            const VarInfo* vInfo = getVar(baseIdent->name);
+            if (vInfo && vInfo->type.isVector()) {
+                VReg valReg = emitExpr(*stmt.value, fn);
+                IRType elemTy = vInfo->type.isFloatVector() ? IRType::F32 : IRType::S32;
+                if (elemTy == IRType::F32 && stmt.value->resolvedType.isInt()) {
+                    VReg cvtReg = fn.freshReg(IRType::F32);
+                    fn.emit(IRInst{IROp::CvtI2F, cvtReg, valReg, 0, IRType::F32});
+                    valReg = cvtReg;
+                }
+                fn.emit(IRInst{IROp::Mov, vInfo->regs[compIdx], valReg, 0, elemTy});
+                return;
+            }
+        } else if (auto* baseIdx = dynamic_cast<const IndexExpr*>(mem->base.get())) {
+            AddrSpace space;
+            IRType elemType;
+            VReg baseAddr = emitElementAddress(*baseIdx, fn, space, elemType);
+            VReg finalAddr = baseAddr;
+            if (compIdx > 0) {
+                if (space == AddrSpace::Global) {
+                    VReg offReg = fn.freshReg(IRType::S64);
+                    VReg cReg = fn.freshReg(IRType::S32);
+                    IRInst ldC{IROp::LoadImm, cReg, 0, 0, IRType::S32};
+                    ldC.immInt = compIdx * 4;
+                    fn.emit(ldC);
+                    VReg oneReg = fn.freshReg(IRType::S32);
+                    IRInst ldOne{IROp::LoadImm, oneReg, 0, 0, IRType::S32};
+                    ldOne.immInt = 1;
+                    fn.emit(ldOne);
+                    fn.emit(IRInst{IROp::MulWide, offReg, cReg, oneReg, IRType::S64});
+                    finalAddr = fn.freshReg(IRType::S64);
+                    fn.emit(IRInst{IROp::AddS64, finalAddr, baseAddr, offReg, IRType::S64});
+                } else {
+                    VReg offReg = fn.freshReg(IRType::S32);
+                    IRInst ldC{IROp::LoadImm, offReg, 0, 0, IRType::S32};
+                    ldC.immInt = compIdx * 4;
+                    fn.emit(ldC);
+                    finalAddr = fn.freshReg(IRType::S32);
+                    fn.emit(IRInst{IROp::Add, finalAddr, baseAddr, offReg, IRType::S32});
+                }
+            }
+            VReg valReg = emitExpr(*stmt.value, fn);
+            if (elemType == IRType::F32 && stmt.value->resolvedType.isInt()) {
+                VReg cvtReg = fn.freshReg(IRType::F32);
+                fn.emit(IRInst{IROp::CvtI2F, cvtReg, valReg, 0, IRType::F32});
+                valReg = cvtReg;
+            }
+            IRInst store{IROp::Store, 0, finalAddr, valReg, elemType};
+            store.space = space;
+            fn.emit(store);
+            return;
+        }
     } else if (auto* idx = dynamic_cast<const IndexExpr*>(stmt.target.get())) {
         AddrSpace space;
         IRType elemType;
         VReg addrReg = emitElementAddress(*idx, fn, space, elemType);
+
+        if (stmt.target->resolvedType.isVector()) {
+            std::vector<VReg> valRegs = emitVectorExpr(*stmt.value, fn);
+            int width = stmt.target->resolvedType.vectorWidth();
+            if (width == 2) {
+                IRInst store{IROp::StoreV2, 0, addrReg, 0, elemType};
+                store.space = space;
+                store.args = valRegs;
+                fn.emit(store);
+            } else {
+                IRInst store{IROp::StoreV4, 0, addrReg, 0, elemType};
+                store.space = space;
+                store.args = valRegs;
+                fn.emit(store);
+            }
+            return;
+        }
 
         VReg valReg = emitExpr(*stmt.value, fn);
         if (elemType == IRType::F32 && stmt.value->resolvedType.isInt()) {
@@ -214,9 +320,6 @@ void IRGen::emitAssign(const AssignStmt& stmt, IRFunction& fn) {
 }
 
 void IRGen::emitSharedDecl(const SharedDeclStmt& stmt, IRFunction& fn) {
-    // Module-scope symbol <kernel>$<array>. The '$' keeps it apart from every source name and
-    // from other kernels' arrays (kernel names cannot contain '$'). A second array with the
-    // same name in another scope of this kernel gets a "$<n>" suffix.
     std::string symbol = ptxname::shared(fn.name, stmt.name);
     auto taken = [&](const std::string& s) {
         for (const auto& sv : fn.sharedVars)
@@ -226,7 +329,11 @@ void IRGen::emitSharedDecl(const SharedDeclStmt& stmt, IRFunction& fn) {
     for (int n = 1; taken(symbol); ++n) {
         symbol = ptxname::shared(fn.name, stmt.name) + "$" + std::to_string(n);
     }
-    fn.sharedVars.push_back({symbol, toIRType(stmt.elemType), stmt.size});
+    int width = stmt.elemType.vectorWidth();
+    int align = stmt.elemType.sizeInBytes();
+    if (align == 0) align = 4;
+    int64_t count = stmt.size * width;
+    fn.sharedVars.push_back({symbol, toIRType(stmt.elemType), count, align});
     setVar(stmt.name, 0, Type::makeSharedArray(stmt.elemType.kind), symbol);
 }
 
@@ -237,7 +344,16 @@ VReg IRGen::emitElementAddress(const IndexExpr& idx, IRFunction& fn, AddrSpace& 
 VReg IRGen::emitMemoryAddress(const Expr& baseExpr, const Expr* indexExpr, IRFunction& fn, AddrSpace& space, IRType& elemType) {
     auto* baseIdent = dynamic_cast<const IdentExpr*>(&baseExpr);
     const VarInfo* baseInfo = getVar(baseIdent->name);
-    elemType = baseInfo->type.pointeeKind == Type::Float ? IRType::F32 : IRType::S32;
+    bool isFloat = (baseInfo->type.pointeeKind == Type::Float ||
+                    baseInfo->type.pointeeKind == Type::Float2 ||
+                    baseInfo->type.pointeeKind == Type::Float4);
+    elemType = isFloat ? IRType::F32 : IRType::S32;
+
+    int scaleBytes = 4;
+    Type pointeeType(baseInfo->type.pointeeKind);
+    if (pointeeType.sizeInBytes() > 0) {
+        scaleBytes = pointeeType.sizeInBytes();
+    }
 
     if (baseInfo->type.isSharedArray()) {
         // 32-bit arithmetic: shared addresses are offsets into the block's shared window.
@@ -251,7 +367,7 @@ VReg IRGen::emitMemoryAddress(const Expr& baseExpr, const Expr* indexExpr, IRFun
             VReg idxReg = emitExpr(*indexExpr, fn);
             VReg szReg = fn.freshReg(IRType::S32);
             IRInst ldimm{IROp::LoadImm, szReg, 0, 0, IRType::S32};
-            ldimm.immInt = 4;
+            ldimm.immInt = scaleBytes;
             fn.emit(ldimm);
 
             VReg offReg = fn.freshReg(IRType::S32);
@@ -269,7 +385,7 @@ VReg IRGen::emitMemoryAddress(const Expr& baseExpr, const Expr* indexExpr, IRFun
         VReg idxReg = emitExpr(*indexExpr, fn);
         VReg szReg = fn.freshReg(IRType::S32);
         IRInst ldimm{IROp::LoadImm, szReg, 0, 0, IRType::S32};
-        ldimm.immInt = 4;
+        ldimm.immInt = scaleBytes;
         fn.emit(ldimm);
 
         VReg offReg = fn.freshReg(IRType::S64);
@@ -562,6 +678,9 @@ VReg IRGen::emitExpr(const Expr& expr, IRFunction& fn) {
     if (auto* idx = dynamic_cast<const IndexExpr*>(&expr)) {
         return emitIndexExpr(*idx, fn);
     }
+    if (auto* mem = dynamic_cast<const MemberExpr*>(&expr)) {
+        return emitMemberExpr(*mem, fn);
+    }
     if (auto* cast = dynamic_cast<const CastExpr*>(&expr)) {
         return emitCastExpr(*cast, fn);
     }
@@ -684,6 +803,174 @@ VReg IRGen::emitIndexExpr(const IndexExpr& expr, IRFunction& fn) {
     load.space = space;
     fn.emit(load);
     return dstReg;
+}
+
+VReg IRGen::emitMemberExpr(const MemberExpr& expr, IRFunction& fn) {
+    int compIdx = 0;
+    if (expr.member == "x") compIdx = 0;
+    else if (expr.member == "y") compIdx = 1;
+    else if (expr.member == "z") compIdx = 2;
+    else if (expr.member == "w") compIdx = 3;
+
+    if (auto* baseIdent = dynamic_cast<const IdentExpr*>(expr.base.get())) {
+        const VarInfo* vInfo = getVar(baseIdent->name);
+        if (vInfo && vInfo->type.isVector()) {
+            return vInfo->regs[compIdx];
+        }
+    } else if (auto* baseIdx = dynamic_cast<const IndexExpr*>(expr.base.get())) {
+        AddrSpace space;
+        IRType elemType;
+        VReg baseAddr = emitElementAddress(*baseIdx, fn, space, elemType);
+        VReg finalAddr = baseAddr;
+        if (compIdx > 0) {
+            if (space == AddrSpace::Global) {
+                VReg offReg = fn.freshReg(IRType::S64);
+                VReg cReg = fn.freshReg(IRType::S32);
+                IRInst ldC{IROp::LoadImm, cReg, 0, 0, IRType::S32};
+                ldC.immInt = compIdx * 4;
+                fn.emit(ldC);
+                VReg oneReg = fn.freshReg(IRType::S32);
+                IRInst ldOne{IROp::LoadImm, oneReg, 0, 0, IRType::S32};
+                ldOne.immInt = 1;
+                fn.emit(ldOne);
+                fn.emit(IRInst{IROp::MulWide, offReg, cReg, oneReg, IRType::S64});
+                finalAddr = fn.freshReg(IRType::S64);
+                fn.emit(IRInst{IROp::AddS64, finalAddr, baseAddr, offReg, IRType::S64});
+            } else {
+                VReg offReg = fn.freshReg(IRType::S32);
+                IRInst ldC{IROp::LoadImm, offReg, 0, 0, IRType::S32};
+                ldC.immInt = compIdx * 4;
+                fn.emit(ldC);
+                finalAddr = fn.freshReg(IRType::S32);
+                fn.emit(IRInst{IROp::Add, finalAddr, baseAddr, offReg, IRType::S32});
+            }
+        }
+        VReg dstReg = fn.freshReg(elemType);
+        IRInst load{IROp::Load, dstReg, finalAddr, 0, elemType};
+        load.space = space;
+        fn.emit(load);
+        return dstReg;
+    }
+
+    std::vector<VReg> vRegs = emitVectorExpr(*expr.base, fn);
+    if (compIdx < static_cast<int>(vRegs.size())) {
+        return vRegs[compIdx];
+    }
+    return 0;
+}
+
+std::vector<VReg> IRGen::emitVectorExpr(const Expr& expr, IRFunction& fn) {
+    if (auto* ident = dynamic_cast<const IdentExpr*>(&expr)) {
+        const VarInfo* vInfo = getVar(ident->name);
+        if (vInfo && vInfo->type.isVector()) {
+            return vInfo->regs;
+        }
+    }
+    if (auto* idx = dynamic_cast<const IndexExpr*>(&expr)) {
+        AddrSpace space;
+        IRType elemType;
+        VReg addrReg = emitElementAddress(*idx, fn, space, elemType);
+        int width = expr.resolvedType.vectorWidth();
+        std::vector<VReg> dsts;
+        for (int i = 0; i < width; ++i) dsts.push_back(fn.freshReg(elemType));
+        if (width == 2) {
+            IRInst ld{IROp::LoadV2, 0, addrReg, 0, elemType};
+            ld.space = space;
+            ld.dsts = dsts;
+            fn.emit(ld);
+        } else {
+            IRInst ld{IROp::LoadV4, 0, addrReg, 0, elemType};
+            ld.space = space;
+            ld.dsts = dsts;
+            fn.emit(ld);
+        }
+        return dsts;
+    }
+    if (auto* call = dynamic_cast<const CallExpr*>(&expr)) {
+        if (isVectorConstructor(call->callee)) {
+            bool isFloat = expr.resolvedType.isFloatVector();
+            std::vector<VReg> res;
+            for (size_t i = 0; i < call->args.size(); ++i) {
+                VReg a = emitExpr(*call->args[i], fn);
+                if (isFloat && call->args[i]->resolvedType.isInt()) {
+                    VReg cvt = fn.freshReg(IRType::F32);
+                    fn.emit(IRInst{IROp::CvtI2F, cvt, a, 0, IRType::F32});
+                    a = cvt;
+                }
+                res.push_back(a);
+            }
+            return res;
+        }
+        if (auto vecIntrin = getVectorIntrinsic(call->callee)) {
+            bool is2 = (*vecIntrin == VectorIntrinsic::LoadInt2 ||
+                        *vecIntrin == VectorIntrinsic::LoadFloat2);
+            AddrSpace space;
+            IRType elemType;
+            VReg addrReg = emitVectorIntrinsicAddress(*call->args[0], *call->args[1], fn, space, elemType);
+            int width = is2 ? 2 : 4;
+            std::vector<VReg> dsts;
+            for (int i = 0; i < width; ++i) dsts.push_back(fn.freshReg(elemType));
+            if (is2) {
+                IRInst ld{IROp::LoadV2, 0, addrReg, 0, elemType};
+                ld.space = space;
+                ld.dsts = dsts;
+                fn.emit(ld);
+            } else {
+                IRInst ld{IROp::LoadV4, 0, addrReg, 0, elemType};
+                ld.space = space;
+                ld.dsts = dsts;
+                fn.emit(ld);
+            }
+            return dsts;
+        }
+    }
+    return {};
+}
+
+VReg IRGen::emitVectorIntrinsicAddress(const Expr& baseExpr, const Expr& indexExpr, IRFunction& fn, AddrSpace& space, IRType& elemType) {
+    auto* baseIdent = dynamic_cast<const IdentExpr*>(&baseExpr);
+    const VarInfo* baseInfo = getVar(baseIdent->name);
+    bool isFloat = (baseInfo->type.pointeeKind == Type::Float ||
+                    baseInfo->type.pointeeKind == Type::Float2 ||
+                    baseInfo->type.pointeeKind == Type::Float4);
+    elemType = isFloat ? IRType::F32 : IRType::S32;
+
+    Type pointeeType(baseInfo->type.pointeeKind);
+    int scaleBytes = pointeeType.sizeInBytes();
+    if (scaleBytes == 0) scaleBytes = 4;
+
+    if (baseInfo->type.isSharedArray()) {
+        space = AddrSpace::Shared;
+        VReg baseReg = fn.freshReg(IRType::S32);
+        IRInst addrOf{IROp::SharedAddr, baseReg, 0, 0, IRType::S32};
+        addrOf.symbol = baseInfo->sharedSymbol;
+        fn.emit(addrOf);
+
+        VReg idxReg = emitExpr(indexExpr, fn);
+        VReg szReg = fn.freshReg(IRType::S32);
+        IRInst ldimm{IROp::LoadImm, szReg, 0, 0, IRType::S32};
+        ldimm.immInt = scaleBytes;
+        fn.emit(ldimm);
+
+        VReg offReg = fn.freshReg(IRType::S32);
+        fn.emit(IRInst{IROp::Mul, offReg, idxReg, szReg, IRType::S32});
+        VReg addrReg = fn.freshReg(IRType::S32);
+        fn.emit(IRInst{IROp::Add, addrReg, baseReg, offReg, IRType::S32});
+        return addrReg;
+    }
+
+    space = AddrSpace::Global;
+    VReg idxReg = emitExpr(indexExpr, fn);
+    VReg szReg = fn.freshReg(IRType::S32);
+    IRInst ldimm{IROp::LoadImm, szReg, 0, 0, IRType::S32};
+    ldimm.immInt = scaleBytes;
+    fn.emit(ldimm);
+
+    VReg offReg = fn.freshReg(IRType::S64);
+    fn.emit(IRInst{IROp::MulWide, offReg, idxReg, szReg, IRType::S64});
+    VReg addrReg = fn.freshReg(IRType::S64);
+    fn.emit(IRInst{IROp::AddS64, addrReg, baseInfo->reg, offReg, IRType::S64});
+    return addrReg;
 }
 
 VReg IRGen::emitCastExpr(const CastExpr& expr, IRFunction& fn) {
@@ -831,6 +1118,57 @@ VReg IRGen::emitCallExpr(const CallExpr& expr, IRFunction& fn) {
         inst.space = space;
         fn.emit(inst);
         return dstReg;
+    }
+
+    if (auto vecIntrin = getVectorIntrinsic(expr.callee)) {
+        bool isStore = (*vecIntrin == VectorIntrinsic::StoreInt2 ||
+                        *vecIntrin == VectorIntrinsic::StoreInt4 ||
+                        *vecIntrin == VectorIntrinsic::StoreFloat2 ||
+                        *vecIntrin == VectorIntrinsic::StoreFloat4);
+        bool is2 = (*vecIntrin == VectorIntrinsic::LoadInt2 ||
+                    *vecIntrin == VectorIntrinsic::StoreInt2 ||
+                    *vecIntrin == VectorIntrinsic::LoadFloat2 ||
+                    *vecIntrin == VectorIntrinsic::StoreFloat2);
+        AddrSpace space;
+        IRType elemType;
+        VReg addrReg = emitVectorIntrinsicAddress(*expr.args[0], *expr.args[1], fn, space, elemType);
+
+        if (isStore) {
+            std::vector<VReg> valRegs = emitVectorExpr(*expr.args[2], fn);
+            if (is2) {
+                IRInst st{IROp::StoreV2, 0, addrReg, 0, elemType};
+                st.space = space;
+                st.args = valRegs;
+                fn.emit(st);
+            } else {
+                IRInst st{IROp::StoreV4, 0, addrReg, 0, elemType};
+                st.space = space;
+                st.args = valRegs;
+                fn.emit(st);
+            }
+            return 0;
+        } else {
+            int width = is2 ? 2 : 4;
+            std::vector<VReg> dsts;
+            for (int i = 0; i < width; ++i) dsts.push_back(fn.freshReg(elemType));
+            if (is2) {
+                IRInst ld{IROp::LoadV2, 0, addrReg, 0, elemType};
+                ld.space = space;
+                ld.dsts = dsts;
+                fn.emit(ld);
+            } else {
+                IRInst ld{IROp::LoadV4, 0, addrReg, 0, elemType};
+                ld.space = space;
+                ld.dsts = dsts;
+                fn.emit(ld);
+            }
+            return dsts[0];
+        }
+    }
+
+    if (isVectorConstructor(expr.callee)) {
+        std::vector<VReg> regs = emitVectorExpr(expr, fn);
+        return regs.empty() ? 0 : regs[0];
     }
 
     auto it = funcSignatures_.find(expr.callee);

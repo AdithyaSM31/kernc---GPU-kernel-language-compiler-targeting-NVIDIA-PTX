@@ -29,6 +29,8 @@ private:
     VReg emitBinaryExpr(const BinaryExpr& expr, IRFunction& fn);
     VReg emitUnaryExpr(const UnaryExpr& expr, IRFunction& fn);
     VReg emitIndexExpr(const IndexExpr& expr, IRFunction& fn);
+    VReg emitMemberExpr(const MemberExpr& expr, IRFunction& fn);
+    std::vector<VReg> emitVectorExpr(const Expr& expr, IRFunction& fn);
     VReg emitCastExpr(const CastExpr& expr, IRFunction& fn);
     VReg emitBuiltin(const BuiltinExpr& expr, IRFunction& fn);
     VReg emitCallExpr(const CallExpr& expr, IRFunction& fn);
@@ -44,9 +46,11 @@ private:
     // Address of base[index]; sets `space` and `elemType` for the Load/Store that uses it.
     VReg emitElementAddress(const IndexExpr& idx, IRFunction& fn, AddrSpace& space, IRType& elemType);
     VReg emitMemoryAddress(const Expr& baseExpr, const Expr* indexExpr, IRFunction& fn, AddrSpace& space, IRType& elemType);
+    VReg emitVectorIntrinsicAddress(const Expr& baseExpr, const Expr& indexExpr, IRFunction& fn, AddrSpace& space, IRType& elemType);
 
     struct VarInfo {
-        VReg reg;                 // 0 for shared arrays, which live in memory, not a register
+        VReg reg = 0;             // 0 for shared arrays and vector variables
+        std::vector<VReg> regs;   // component registers for vector variables
         Type type;
         std::string sharedSymbol; // module-scope .shared symbol, for shared arrays
     };
@@ -61,9 +65,9 @@ private:
         }
     }
 
-    void setVar(const std::string& name, VReg reg, Type type, std::string sharedSymbol = "") {
+    void setVar(const std::string& name, VReg reg, Type type, std::string sharedSymbol = "", std::vector<VReg> regs = {}) {
         if (!varScopes_.empty()) {
-            varScopes_.back()[name] = {reg, type, std::move(sharedSymbol)};
+            varScopes_.back()[name] = {reg, std::move(regs), type, std::move(sharedSymbol)};
         }
     }
 

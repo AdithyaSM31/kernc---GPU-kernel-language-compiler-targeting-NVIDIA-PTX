@@ -320,3 +320,60 @@ TEST(ParserTest, MultiDimensionalBuiltins) {
     checkBuiltin(13, BuiltinKind::ThreadIdxY);
     checkBuiltin(14, BuiltinKind::ThreadIdxZ);
 }
+
+TEST(ParserTest, VectorTypesAndConstructors) {
+    std::string src = "kernel test(int4* in, float2* out) {\n"
+                      "    int2 v2 = int2(1, 2);\n"
+                      "    int4 v4 = make_int4(1, 2, 3, 4);\n"
+                      "    float2 f2 = float2(1.0, 2.0);\n"
+                      "    float4 f4 = make_float4(1.0, 2.0, 3.0, 4.0);\n"
+                      "    shared int4 s_buf[64];\n"
+                      "    int a = v4.x;\n"
+                      "    int b = v4.w;\n"
+                      "    float c = in[0].y;\n"
+                      "    v2.x = 10;\n"
+                      "    in[1].z = 20;\n"
+                      "}\n";
+    auto k = parseKernel(src);
+    ASSERT_NE(k, nullptr);
+    ASSERT_EQ(k->params.size(), 2u);
+    EXPECT_TRUE(k->params[0].type.isPtr());
+    EXPECT_EQ(k->params[0].type.pointeeKind, Type::Int4);
+    EXPECT_TRUE(k->params[1].type.isPtr());
+    EXPECT_EQ(k->params[1].type.pointeeKind, Type::Float2);
+
+    ASSERT_EQ(k->body.size(), 10u);
+    auto* d0 = dynamic_cast<VarDeclStmt*>(k->body[0].get());
+    ASSERT_NE(d0, nullptr);
+    EXPECT_EQ(d0->type.kind, Type::Int2);
+    auto* call0 = dynamic_cast<CallExpr*>(d0->init.get());
+    ASSERT_NE(call0, nullptr);
+    EXPECT_EQ(call0->callee, "int2");
+    EXPECT_EQ(call0->args.size(), 2u);
+
+    auto* d5 = dynamic_cast<VarDeclStmt*>(k->body[5].get());
+    ASSERT_NE(d5, nullptr);
+    auto* mem5 = dynamic_cast<MemberExpr*>(d5->init.get());
+    ASSERT_NE(mem5, nullptr);
+    EXPECT_EQ(mem5->member, "x");
+
+    auto* d7 = dynamic_cast<VarDeclStmt*>(k->body[7].get());
+    ASSERT_NE(d7, nullptr);
+    auto* mem7 = dynamic_cast<MemberExpr*>(d7->init.get());
+    ASSERT_NE(mem7, nullptr);
+    EXPECT_EQ(mem7->member, "y");
+    auto* idx7 = dynamic_cast<IndexExpr*>(mem7->base.get());
+    ASSERT_NE(idx7, nullptr);
+
+    auto* a8 = dynamic_cast<AssignStmt*>(k->body[8].get());
+    ASSERT_NE(a8, nullptr);
+    auto* mem8 = dynamic_cast<MemberExpr*>(a8->target.get());
+    ASSERT_NE(mem8, nullptr);
+    EXPECT_EQ(mem8->member, "x");
+
+    auto* a9 = dynamic_cast<AssignStmt*>(k->body[9].get());
+    ASSERT_NE(a9, nullptr);
+    auto* mem9 = dynamic_cast<MemberExpr*>(a9->target.get());
+    ASSERT_NE(mem9, nullptr);
+    EXPECT_EQ(mem9->member, "z");
+}

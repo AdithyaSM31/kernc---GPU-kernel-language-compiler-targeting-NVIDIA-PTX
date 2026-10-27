@@ -723,6 +723,73 @@ TEST(IRPassTest, DeviceFunctionCallingAtomicOperations) {
     EXPECT_NE(ptx.find("call ($ret), dev_add"), std::string::npos) << ptx;
 }
 
+TEST(IRPassTest, VectorLoadStoreIROpsAndPTX) {
+    std::string src =
+        "kernel test(int4* in_i, int4* out_i, float2* in_f, float2* out_f) {\n"
+        "    shared int4 s_i[32];\n"
+        "    shared float2 s_f[64];\n"
+        "    int i = thread_idx;\n"
+        "    int4 vi = in_i[i];\n"
+        "    s_i[i] = vi;\n"
+        "    out_i[i] = s_i[i];\n"
+        "    float2 vf = in_f[i];\n"
+        "    s_f[i] = vf;\n"
+        "    out_f[i] = s_f[i];\n"
+        "}\n";
+    auto mod = compileModule(src);
+    const IRFunction* fn = findFunction(mod, "test");
+    ASSERT_NE(fn, nullptr);
+
+    EXPECT_GE(countOps(*fn, IROp::LoadV4), 2);
+    EXPECT_GE(countOps(*fn, IROp::StoreV4), 2);
+    EXPECT_GE(countOps(*fn, IROp::LoadV2), 2);
+    EXPECT_GE(countOps(*fn, IROp::StoreV2), 2);
+
+    PTXEmitter emitter;
+    std::string ptx = emitter.emitModule(mod);
+    EXPECT_NE(ptx.find(".shared .align 16 .s32 test$s_i[128];"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find(".shared .align 8 .f32 test$s_f[128];"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("ld.global.v4.s32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("st.shared.v4.s32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("ld.shared.v4.s32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("st.global.v4.s32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("ld.global.v2.f32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("st.shared.v2.f32"), std::string::npos) << ptx;
+}
+
+TEST(IRPassTest, VectorStoresNotPrunedByDCE) {
+    std::string src =
+        "kernel test(int4* out_i, float2* out_f) {\n"
+        "    out_i[0] = int4(1, 2, 3, 4);\n"
+        "    out_f[0] = float2(1.0, 2.0);\n"
+        "}\n";
+    auto mod = compileModule(src);
+    IRFunction* fn = const_cast<IRFunction*>(findFunction(mod, "test"));
+    ASSERT_NE(fn, nullptr);
+    EXPECT_EQ(countOps(*fn, IROp::StoreV4), 1);
+    EXPECT_EQ(countOps(*fn, IROp::StoreV2), 1);
+
+    Optimizer::runPasses(*fn);
+    EXPECT_EQ(countOps(*fn, IROp::StoreV4), 1) << "StoreV4 must not be pruned by DCE";
+    EXPECT_EQ(countOps(*fn, IROp::StoreV2), 1) << "StoreV2 must not be pruned by DCE";
+}
+
+TEST(IRPassTest, VectorLoadsPrunedByDCEWhenCompletelyUnused) {
+    std::string src =
+        "kernel test(int4* in_i, int4* out_i) {\n"
+        "    int4 dead = in_i[0];\n" // completely unused
+        "    int4 live = in_i[1];\n"
+        "    out_i[0] = make_int4(live.z, 0, 0, 0);\n" // only .z is used
+        "}\n";
+    auto mod = compileModule(src);
+    IRFunction* fn = const_cast<IRFunction*>(findFunction(mod, "test"));
+    ASSERT_NE(fn, nullptr);
+    EXPECT_EQ(countOps(*fn, IROp::LoadV4), 2);
+
+    Optimizer::runPasses(*fn);
+    EXPECT_EQ(countOps(*fn, IROp::LoadV4), 1) << "Dead LoadV4 must be pruned, live LoadV4 kept";
+}
+
 
 
 

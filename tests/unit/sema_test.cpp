@@ -582,4 +582,55 @@ TEST(SemaTest, AtomicOperationsRedefinitionOrShadowingRejected) {
     EXPECT_NE(diag4.formatAll().find("reserved builtin name"), std::string::npos);
 }
 
+TEST(SemaTest, VectorOperationsAccepted) {
+    std::string src =
+        "kernel test(int4* in_i, float4* in_f, int* raw_i, float* raw_f) {\n"
+        "    int2 v2 = int2(1, 2);\n"
+        "    int4 v4 = make_int4(1, 2, 3, 4);\n"
+        "    float2 f2 = float2(1.0, 2.0);\n"
+        "    float4 f4 = make_float4(1, 2, 3, 4);\n" // implicit int -> float promotion in float4
+        "    int x = v4.x;\n"
+        "    int y = v4.y;\n"
+        "    int z = v4.z;\n"
+        "    int w = v4.w;\n"
+        "    float fx = f4.x;\n"
+        "    v4.x = 10;\n"
+        "    in_i[0].y = 20;\n"
+        "    shared int4 s_i[16];\n"
+        "    s_i[thread_idx].z = 30;\n"
+        "    int4 loaded = load_int4(raw_i, 0);\n"
+        "    store_int4(raw_i, 1, loaded);\n"
+        "    float2 f_loaded = load_float2(in_f, 2);\n"
+        "    store_float2(raw_f, 3, f_loaded);\n"
+        "}\n";
+    DiagnosticsEngine diag;
+    EXPECT_TRUE(checkSource(src, diag)) << diag.formatAll();
+}
+
+TEST(SemaTest, VectorOperationsErrors) {
+    struct TestCase {
+        std::string src;
+        std::string expectedErr;
+    };
+
+    TestCase cases[] = {
+        {"kernel k() { int2 v = int2(1, 2); int z = v.z; }", "vector member 'z' is out of range for 2-element vector 'int2'"},
+        {"kernel k() { float2 v = float2(1.0, 2.0); float w = v.w; }", "vector member 'w' is out of range for 2-element vector 'float2'"},
+        {"kernel k() { int4 v = int4(1, 2, 3, 4); int f = v.foo; }", "invalid member 'foo' on vector type 'int4'"},
+        {"kernel k() { int a = 5; int x = a.x; }", "member access '.' on non-vector type 'int'"},
+        {"kernel k() { int2 v = int2(1); }", "vector constructor 'int2' expects 2 argument(s), got 1"},
+        {"kernel k() { int4 v = int4(1, 2); }", "vector constructor 'int4' expects 4 argument(s), got 2"},
+        {"kernel k() { int2 v = int2(1.5, 2); }", "argument 1 of 'int2' must be 'int', got 'float'"},
+        {"kernel k(float* p) { int4 v = load_int4(p, 0); }", "has incompatible buffer element type 'float*'"},
+        {"kernel k(int* p) { store_int4(p, 0, 5); }", "argument 3 ('value') of 'store_int4' must be 'int4', got 'int'"},
+    };
+
+    for (const auto& tc : cases) {
+        DiagnosticsEngine diag;
+        EXPECT_FALSE(checkSource(tc.src, diag)) << tc.src;
+        EXPECT_NE(diag.formatAll().find(tc.expectedErr), std::string::npos)
+            << "Expected: " << tc.expectedErr << "\nGot: " << diag.formatAll();
+    }
+}
+
 

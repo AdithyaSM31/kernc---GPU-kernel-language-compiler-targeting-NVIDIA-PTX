@@ -51,6 +51,30 @@ Type Parser::parseType() {
         }
         return Type::makeFloat();
     }
+    if (match(TokenKind::KW_int2)) {
+        if (match(TokenKind::Star)) {
+            return Type::makeInt2Ptr();
+        }
+        return Type::makeInt2();
+    }
+    if (match(TokenKind::KW_int4)) {
+        if (match(TokenKind::Star)) {
+            return Type::makeInt4Ptr();
+        }
+        return Type::makeInt4();
+    }
+    if (match(TokenKind::KW_float2)) {
+        if (match(TokenKind::Star)) {
+            return Type::makeFloat2Ptr();
+        }
+        return Type::makeFloat2();
+    }
+    if (match(TokenKind::KW_float4)) {
+        if (match(TokenKind::Star)) {
+            return Type::makeFloat4Ptr();
+        }
+        return Type::makeFloat4();
+    }
     if (match(TokenKind::KW_bool)) {
         // bool lives in .pred registers, which have no memory representation to point at.
         if (check(TokenKind::Star)) {
@@ -169,7 +193,9 @@ std::unique_ptr<Program> Parser::parseProgram() {
 }
 
 std::unique_ptr<Stmt> Parser::parseStmt() {
-    if (check(TokenKind::KW_int) || check(TokenKind::KW_float) || check(TokenKind::KW_bool)) {
+    if (check(TokenKind::KW_int) || check(TokenKind::KW_float) || check(TokenKind::KW_bool) ||
+        check(TokenKind::KW_int2) || check(TokenKind::KW_int4) ||
+        check(TokenKind::KW_float2) || check(TokenKind::KW_float4)) {
         return parseVarDecl();
     }
     if (check(TokenKind::KW_if)) {
@@ -300,7 +326,9 @@ std::unique_ptr<Stmt> Parser::parseForStmt() {
 
     // Init
     std::unique_ptr<Stmt> init = nullptr;
-    if (check(TokenKind::KW_int) || check(TokenKind::KW_float) || check(TokenKind::KW_bool)) {
+    if (check(TokenKind::KW_int) || check(TokenKind::KW_float) || check(TokenKind::KW_bool) ||
+        check(TokenKind::KW_int2) || check(TokenKind::KW_int4) ||
+        check(TokenKind::KW_float2) || check(TokenKind::KW_float4)) {
         init = parseVarDecl();
     } else if (match(TokenKind::Semicolon)) {
         init = nullptr;
@@ -594,6 +622,23 @@ std::unique_ptr<Expr> Parser::parsePrimary() {
             expr = std::make_unique<IdentExpr>(std::string(tok.text));
             expr->range = {tok.loc, tok.loc};
         }
+    } else if (check(TokenKind::KW_int2) || check(TokenKind::KW_int4) ||
+               check(TokenKind::KW_float2) || check(TokenKind::KW_float4)) {
+        Token tok = advance();
+        consume(TokenKind::LParen, "expected '(' after vector constructor name");
+        std::vector<std::unique_ptr<Expr>> args;
+        if (!check(TokenKind::RParen)) {
+            do {
+                auto arg = parseExpr();
+                if (!arg) return nullptr;
+                args.push_back(std::move(arg));
+            } while (match(TokenKind::Comma));
+        }
+        SourceLocation endLoc = current_.loc;
+        consume(TokenKind::RParen, "expected ')' after argument list");
+        auto call = std::make_unique<CallExpr>(std::string(tok.text), std::move(args));
+        call->range = {tok.loc, endLoc};
+        expr = std::move(call);
     } else if (match(TokenKind::LParen)) {
         expr = parseExpr();
         consume(TokenKind::RParen, "expected ')' after expression");
@@ -603,14 +648,24 @@ std::unique_ptr<Expr> Parser::parsePrimary() {
         return nullptr;
     }
 
-    // Handle postfix indexing: [index]
-    while (match(TokenKind::LBracket)) {
-        auto index = parseExpr();
-        SourceLocation endLoc = current_.loc;
-        consume(TokenKind::RBracket, "expected ']' after index");
-        auto idxExpr = std::make_unique<IndexExpr>(std::move(expr), std::move(index));
-        idxExpr->range = {startLoc, endLoc};
-        expr = std::move(idxExpr);
+    // Handle postfix indexing and member access: [index] and .member
+    while (true) {
+        if (match(TokenKind::LBracket)) {
+            auto index = parseExpr();
+            SourceLocation endLoc = current_.loc;
+            consume(TokenKind::RBracket, "expected ']' after index");
+            auto idxExpr = std::make_unique<IndexExpr>(std::move(expr), std::move(index));
+            idxExpr->range = {startLoc, endLoc};
+            expr = std::move(idxExpr);
+        } else if (match(TokenKind::Dot)) {
+            Token memTok = consume(TokenKind::Identifier, "expected member name after '.'");
+            SourceLocation endLoc = memTok.loc;
+            auto memExpr = std::make_unique<MemberExpr>(std::move(expr), std::string(memTok.text));
+            memExpr->range = {startLoc, endLoc};
+            expr = std::move(memExpr);
+        } else {
+            break;
+        }
     }
 
     return expr;

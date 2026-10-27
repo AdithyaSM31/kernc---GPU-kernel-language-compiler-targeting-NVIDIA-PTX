@@ -1,0 +1,109 @@
+// Regression test: Vector memory operations (int2, int4, float2, float4)
+// compiled at both -O0 and -O1.
+// Verified through ptxas -arch=sm_86 and nvdisasm.
+
+kernel test_vector_ops(
+    int2* in2_i, int2* out2_i,
+    int4* in4_i, int4* out4_i,
+    float2* in2_f, float2* out2_f,
+    float4* in4_f, float4* out4_f,
+    int* raw_i, float* raw_f,
+    int n
+) {
+    shared int2 s_i2[64];
+    shared int4 s_i4[32];
+    shared float2 s_f2[64];
+    shared float4 s_f4[32];
+
+    int i = block_idx * block_dim + thread_idx;
+    if (i < n) {
+        // 1. Vector load and store on global memory
+        int2 v2 = in2_i[i];
+        out2_i[i] = v2;
+
+        int4 v4 = in4_i[i];
+        out4_i[i] = v4;
+
+        float2 f2 = in2_f[i];
+        out2_f[i] = f2;
+
+        float4 f4 = in4_f[i];
+        out4_f[i] = f4;
+
+        // 2. Component access and mutation
+        int a = v4.x;
+        int b = v4.y;
+        int c = v4.z;
+        int d = v4.w;
+        v4.x = a + 1;
+        v4.y = b + 2;
+        v4.z = c + 3;
+        v4.w = d + 4;
+        out4_i[i] = v4;
+
+        out4_i[i].x = 100;
+        out4_i[i].y = 200;
+        out4_i[i].z = 300;
+        out4_i[i].w = 400;
+
+        float fa = f4.x;
+        float fb = f4.y;
+        float fc = f4.z;
+        float fd = f4.w;
+        f4.x = fa * 2.0;
+        f4.w = fd * 0.5;
+        out4_f[i] = f4;
+
+        // 3. Vector constructors
+        int2 constructed_i2 = int2(10, 20);
+        int4 constructed_i4 = make_int4(1, 2, 3, 4);
+        float2 constructed_f2 = float2(1.5, 2.5);
+        float4 constructed_f4 = make_float4(1, 2, 3, 4); // implicit int->float promotion
+        out2_i[i] = constructed_i2;
+        out4_i[i] = constructed_i4;
+        out2_f[i] = constructed_f2;
+        out4_f[i] = constructed_f4;
+
+        // 4. Vector load and store through shared memory
+        int tid = thread_idx;
+        if (tid < 32) {
+            s_i4[tid] = v4;
+            s_f4[tid] = f4;
+        }
+        if (tid < 64) {
+            s_i2[tid] = v2;
+            s_f2[tid] = f2;
+        }
+        barrier();
+
+        if (tid < 32) {
+            int4 from_shared_i4 = s_i4[tid];
+            from_shared_i4.x = from_shared_i4.x + 1;
+            out4_i[i] = from_shared_i4;
+
+            float4 from_shared_f4 = s_f4[tid];
+            from_shared_f4.y = from_shared_f4.y + 1.0;
+            out4_f[i] = from_shared_f4;
+        }
+        if (tid < 64) {
+            int2 from_shared_i2 = s_i2[tid];
+            out2_i[i] = from_shared_i2;
+
+            float2 from_shared_f2 = s_f2[tid];
+            out2_f[i] = from_shared_f2;
+        }
+
+        // 5. Explicit helper intrinsics on raw scalar and vector buffers
+        int4 loaded_raw_i4 = load_int4(raw_i, i);
+        store_int4(raw_i, i, loaded_raw_i4);
+
+        int2 loaded_raw_i2 = load_int2(raw_i, i);
+        store_int2(raw_i, i, loaded_raw_i2);
+
+        float4 loaded_raw_f4 = load_float4(raw_f, i);
+        store_float4(raw_f, i, loaded_raw_f4);
+
+        float2 loaded_raw_f2 = load_float2(raw_f, i);
+        store_float2(raw_f, i, loaded_raw_f2);
+    }
+}

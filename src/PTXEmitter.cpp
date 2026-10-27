@@ -123,6 +123,11 @@ std::string PTXEmitter::emitFunction(const IRFunction& fn) {
                     alloc.getOrAlloc(reg, fn.regType(reg));
                 }
             }
+            for (VReg reg : inst.dsts) {
+                if (reg != 0) {
+                    alloc.getOrAlloc(reg, fn.regType(reg));
+                }
+            }
             for (VReg reg : inst.args) {
                 if (reg != 0) {
                     alloc.getOrAlloc(reg, fn.regType(reg));
@@ -140,7 +145,7 @@ std::string PTXEmitter::emitFunction(const IRFunction& fn) {
     // Shared arrays are module-scope symbols (as nvcc emits them); ptxas attributes each one to
     // the kernels that reference it when it reports shared-memory usage.
     for (const auto& sv : fn.sharedVars) {
-        ss << ".shared .align 4 ." << (sv.elemType == IRType::F32 ? "f32" : "s32") << " "
+        ss << ".shared .align " << sv.align << " ." << (sv.elemType == IRType::F32 ? "f32" : "s32") << " "
            << sv.symbol << "[" << sv.count << "];\n";
     }
     if (!fn.sharedVars.empty()) ss << "\n";
@@ -414,6 +419,42 @@ std::string PTXEmitter::emitFunction(const IRFunction& fn) {
                     } else {
                         ss << "    st." << space << "." << ty << " [" << s1 << "], " << s2 << ";\n";
                     }
+                    break;
+                }
+                case IROp::LoadV2: {
+                    const char* space = inst.space == AddrSpace::Shared ? "shared" : "global";
+                    const char* ty = inst.type == IRType::F32 ? "f32" : "s32";
+                    std::string d0 = alloc.get(inst.dsts[0]);
+                    std::string d1 = alloc.get(inst.dsts[1]);
+                    ss << "    ld." << space << ".v2." << ty << " {" << d0 << ", " << d1 << "}, [" << s1 << "];\n";
+                    break;
+                }
+                case IROp::LoadV4: {
+                    const char* space = inst.space == AddrSpace::Shared ? "shared" : "global";
+                    const char* ty = inst.type == IRType::F32 ? "f32" : "s32";
+                    std::string d0 = alloc.get(inst.dsts[0]);
+                    std::string d1 = alloc.get(inst.dsts[1]);
+                    std::string d2 = alloc.get(inst.dsts[2]);
+                    std::string d3 = alloc.get(inst.dsts[3]);
+                    ss << "    ld." << space << ".v4." << ty << " {" << d0 << ", " << d1 << ", " << d2 << ", " << d3 << "}, [" << s1 << "];\n";
+                    break;
+                }
+                case IROp::StoreV2: {
+                    const char* space = inst.space == AddrSpace::Shared ? "shared" : "global";
+                    const char* ty = inst.type == IRType::F32 ? "f32" : "s32";
+                    std::string a0 = alloc.get(inst.args[0]);
+                    std::string a1 = alloc.get(inst.args[1]);
+                    ss << "    st." << space << ".v2." << ty << " [" << s1 << "], {" << a0 << ", " << a1 << "};\n";
+                    break;
+                }
+                case IROp::StoreV4: {
+                    const char* space = inst.space == AddrSpace::Shared ? "shared" : "global";
+                    const char* ty = inst.type == IRType::F32 ? "f32" : "s32";
+                    std::string a0 = alloc.get(inst.args[0]);
+                    std::string a1 = alloc.get(inst.args[1]);
+                    std::string a2 = alloc.get(inst.args[2]);
+                    std::string a3 = alloc.get(inst.args[3]);
+                    ss << "    st." << space << ".v4." << ty << " [" << s1 << "], {" << a0 << ", " << a1 << ", " << a2 << ", " << a3 << "};\n";
                     break;
                 }
 

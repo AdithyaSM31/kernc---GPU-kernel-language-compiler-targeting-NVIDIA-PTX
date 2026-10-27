@@ -24,6 +24,8 @@ static bool returnsOnAllPaths(const Stmt& stmt) {
 static bool isReservedBuiltinName(std::string_view name) {
     if (getWarpIntrinsic(name).has_value()) return true;
     if (getAtomicIntrinsic(name).has_value()) return true;
+    if (getVectorIntrinsic(name).has_value()) return true;
+    if (isVectorConstructor(name)) return true;
     return name == "thread_idx"   || name == "threadIdx"   ||
            name == "thread_idx_x" || name == "thread_idx_y" || name == "thread_idx_z" ||
            name == "block_idx"    || name == "blockIdx"    ||
@@ -38,7 +40,8 @@ bool Sema::checkProgram(Program& program) {
     functions_.clear();
     bool ok = true;
     for (auto& func : program.functions) {
-        if (getWarpIntrinsic(func->name) || getAtomicIntrinsic(func->name)) {
+        if (getWarpIntrinsic(func->name) || getAtomicIntrinsic(func->name) ||
+            getVectorIntrinsic(func->name) || isVectorConstructor(func->name)) {
             diag_.error(func->range.begin, "cannot redefine intrinsic '" + func->name + "' as a " +
                         (func->isKernel ? "kernel" : "function"));
             ok = false;
@@ -148,7 +151,7 @@ void Sema::checkSharedDecl(SharedDeclStmt& stmt) {
         return;
     }
     bool ok = true;
-    if (!stmt.elemType.isInt() && !stmt.elemType.isFloat()) {
+    if (!stmt.elemType.isInt() && !stmt.elemType.isFloat() && !stmt.elemType.isVector()) {
         diag_.error(stmt.range.begin, "shared arrays must have element type 'int' or 'float' (got '" +
                     stmt.elemType.toString() + "')");
         ok = false;
@@ -166,8 +169,8 @@ void Sema::checkSharedDecl(SharedDeclStmt& stmt) {
         return;
     }
     if (ok) {
-        // Every element is 4 bytes. Clamp so a huge literal cannot overflow the running total.
-        sharedBytes_ += stmt.size > kStaticSharedLimit ? kStaticSharedLimit + 1 : stmt.size * 4;
+        int64_t bytes = stmt.size * stmt.elemType.sizeInBytes();
+        sharedBytes_ += stmt.size > kStaticSharedLimit ? kStaticSharedLimit + 1 : bytes;
     }
 }
 
@@ -287,6 +290,12 @@ void Sema::checkAssign(AssignStmt& stmt) {
         }
     } else if (dynamic_cast<IndexExpr*>(stmt.target.get())) {
         // Valid lvalue: ptr[i]
+    } else if (auto* mem = dynamic_cast<MemberExpr*>(stmt.target.get())) {
+        // Valid lvalue: v.x or ptr[i].x
+        if (dynamic_cast<BuiltinExpr*>(mem->base.get())) {
+            diag_.error(mem->range.begin, "cannot assign to built-in component");
+            return;
+        }
     } else {
         diag_.error(stmt.target->range.begin, "lvalue required as left operand of assignment");
         return;
@@ -375,6 +384,9 @@ Type Sema::checkExpr(Expr& expr) {
     }
     if (auto* idx = dynamic_cast<IndexExpr*>(&expr)) {
         return checkIndexExpr(*idx);
+    }
+    if (auto* mem = dynamic_cast<MemberExpr*>(&expr)) {
+        return checkMemberExpr(*mem);
     }
     if (auto* cast = dynamic_cast<CastExpr*>(&expr)) {
         return checkCastExpr(*cast);
@@ -567,6 +579,116 @@ Type Sema::checkCallExpr(CallExpr& expr, bool isExprStmt) {
                 return expr.resolvedType;
             }
         }
+    }
+
+    if (isVectorConstructor(expr.callee)) {
+        bool is2 = (expr.callee == "int2" || expr.callee == "make_int2" ||
+                    expr.callee == "float2" || expr.callee == "make_float2");
+        bool isFloat = (expr.callee == "float2" || expr.callee == "make_float2" ||
+                        expr.callee == "float4" || expr.callee == "make_float4");
+        size_t expectedArgs = is2 ? 2 : 4;
+        if (expr.args.size() != expectedArgs) {
+            diag_.error(expr.range.begin, "vector constructor '" + expr.callee + "' expects " +
+                        std::to_string(expectedArgs) + " argument(s), got " +
+                        std::to_string(expr.args.size()));
+            for (auto& a : expr.args) checkExpr(*a);
+            expr.resolvedType = isFloat ? (is2 ? Type::makeFloat2() : Type::makeFloat4())
+                                        : (is2 ? Type::makeInt2() : Type::makeInt4());
+            return expr.resolvedType;
+        }
+
+        for (size_t i = 0; i < expr.args.size(); ++i) {
+            Type argTy = checkExpr(*expr.args[i]);
+            if (argTy.isVoid()) continue;
+            if (isFloat) {
+                if (!argTy.isFloat() && !argTy.isInt()) {
+                    diag_.error(expr.args[i]->range.begin, "argument " + std::to_string(i + 1) +
+                                " of '" + expr.callee + "' must be 'float' or 'int', got '" +
+                                argTy.toString() + "'");
+                }
+            } else {
+                if (!argTy.isInt()) {
+                    diag_.error(expr.args[i]->range.begin, "argument " + std::to_string(i + 1) +
+                                " of '" + expr.callee + "' must be 'int', got '" +
+                                argTy.toString() + "'");
+                }
+            }
+        }
+
+        expr.resolvedType = isFloat ? (is2 ? Type::makeFloat2() : Type::makeFloat4())
+                                    : (is2 ? Type::makeInt2() : Type::makeInt4());
+        return expr.resolvedType;
+    }
+
+    if (auto vecIntrin = getVectorIntrinsic(expr.callee)) {
+        bool isStore = (*vecIntrin == VectorIntrinsic::StoreInt2 ||
+                        *vecIntrin == VectorIntrinsic::StoreInt4 ||
+                        *vecIntrin == VectorIntrinsic::StoreFloat2 ||
+                        *vecIntrin == VectorIntrinsic::StoreFloat4);
+        bool is2 = (*vecIntrin == VectorIntrinsic::LoadInt2 ||
+                    *vecIntrin == VectorIntrinsic::StoreInt2 ||
+                    *vecIntrin == VectorIntrinsic::LoadFloat2 ||
+                    *vecIntrin == VectorIntrinsic::StoreFloat2);
+        bool isFloat = (*vecIntrin == VectorIntrinsic::LoadFloat2 ||
+                        *vecIntrin == VectorIntrinsic::LoadFloat4 ||
+                        *vecIntrin == VectorIntrinsic::StoreFloat2 ||
+                        *vecIntrin == VectorIntrinsic::StoreFloat4);
+
+        size_t expectedArgs = isStore ? 3 : 2;
+        if (expr.args.size() != expectedArgs) {
+            diag_.error(expr.range.begin, "intrinsic '" + expr.callee + "' expects " +
+                        std::to_string(expectedArgs) + " argument(s), got " +
+                        std::to_string(expr.args.size()));
+            for (auto& a : expr.args) checkExpr(*a);
+            expr.resolvedType = isStore ? Type::makeVoid() :
+                (isFloat ? (is2 ? Type::makeFloat2() : Type::makeFloat4())
+                         : (is2 ? Type::makeInt2() : Type::makeInt4()));
+            return expr.resolvedType;
+        }
+
+        auto* baseIdent = dynamic_cast<IdentExpr*>(expr.args[0].get());
+        Type pType = baseIdent ? checkIdentExpr(*baseIdent, /*allowSharedArray=*/true)
+                               : checkExpr(*expr.args[0]);
+        if (!pType.isVoid()) {
+            if (!pType.isPtr() && !pType.isSharedArray()) {
+                diag_.error(expr.args[0]->range.begin, "argument 1 of '" + expr.callee +
+                            "' must be a pointer or shared array (got '" + pType.toString() + "')");
+            } else {
+                Type::Kind elem = pType.pointeeKind;
+                bool okElem = false;
+                if (isFloat) {
+                    okElem = (elem == Type::Float || elem == Type::Float2 || elem == Type::Float4);
+                } else {
+                    okElem = (elem == Type::Int || elem == Type::Int2 || elem == Type::Int4);
+                }
+                if (!okElem) {
+                    diag_.error(expr.args[0]->range.begin, "argument 1 of '" + expr.callee +
+                                "' has incompatible buffer element type '" + pType.toString() + "'");
+                }
+            }
+        }
+
+        Type idxType = checkExpr(*expr.args[1]);
+        if (!idxType.isVoid() && !idxType.isInt()) {
+            diag_.error(expr.args[1]->range.begin, "argument 2 ('index') of '" + expr.callee +
+                        "' must be 'int', got '" + idxType.toString() + "'");
+        }
+
+        if (isStore) {
+            Type valType = checkExpr(*expr.args[2]);
+            Type expectedVal = isFloat ? (is2 ? Type::makeFloat2() : Type::makeFloat4())
+                                       : (is2 ? Type::makeInt2() : Type::makeInt4());
+            if (!valType.isVoid() && valType != expectedVal) {
+                diag_.error(expr.args[2]->range.begin, "argument 3 ('value') of '" + expr.callee +
+                            "' must be '" + expectedVal.toString() + "', got '" + valType.toString() + "'");
+            }
+            expr.resolvedType = Type::makeVoid();
+            return expr.resolvedType;
+        }
+
+        expr.resolvedType = isFloat ? (is2 ? Type::makeFloat2() : Type::makeFloat4())
+                                    : (is2 ? Type::makeInt2() : Type::makeInt4());
+        return expr.resolvedType;
     }
 
     auto it = functions_.find(expr.callee);
@@ -800,9 +922,56 @@ Type Sema::checkIndexExpr(IndexExpr& expr) {
         expr.resolvedType = Type::makeInt();
     } else if (baseType.pointeeKind == Type::Float) {
         expr.resolvedType = Type::makeFloat();
+    } else if (baseType.pointeeKind == Type::Int2) {
+        expr.resolvedType = Type::makeInt2();
+    } else if (baseType.pointeeKind == Type::Int4) {
+        expr.resolvedType = Type::makeInt4();
+    } else if (baseType.pointeeKind == Type::Float2) {
+        expr.resolvedType = Type::makeFloat2();
+    } else if (baseType.pointeeKind == Type::Float4) {
+        expr.resolvedType = Type::makeFloat4();
     } else {
         expr.resolvedType = Type::makeVoid();
     }
+    return expr.resolvedType;
+}
+
+Type Sema::checkMemberExpr(MemberExpr& expr) {
+    Type baseType = checkExpr(*expr.base);
+    if (baseType.isVoid()) {
+        expr.resolvedType = Type::makeVoid();
+        return expr.resolvedType;
+    }
+
+    if (!baseType.isVector()) {
+        diag_.error(expr.range.begin, "member access '.' on non-vector type '" + baseType.toString() + "'");
+        expr.resolvedType = Type::makeVoid();
+        return expr.resolvedType;
+    }
+
+    int width = baseType.vectorWidth();
+    bool valid = false;
+    if (width == 2) {
+        if (expr.member == "x" || expr.member == "y") {
+            valid = true;
+        } else if (expr.member == "z" || expr.member == "w") {
+            diag_.error(expr.range.begin, "vector member '" + expr.member + "' is out of range for 2-element vector '" + baseType.toString() + "'");
+            expr.resolvedType = Type::makeVoid();
+            return expr.resolvedType;
+        }
+    } else if (width == 4) {
+        if (expr.member == "x" || expr.member == "y" || expr.member == "z" || expr.member == "w") {
+            valid = true;
+        }
+    }
+
+    if (!valid) {
+        diag_.error(expr.range.begin, "invalid member '" + expr.member + "' on vector type '" + baseType.toString() + "'");
+        expr.resolvedType = Type::makeVoid();
+        return expr.resolvedType;
+    }
+
+    expr.resolvedType = baseType.vectorElementType();
     return expr.resolvedType;
 }
 

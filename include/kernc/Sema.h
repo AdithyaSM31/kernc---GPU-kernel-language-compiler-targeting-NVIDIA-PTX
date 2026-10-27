@@ -70,6 +70,7 @@ private:
     Type checkBinaryExpr(BinaryExpr& expr);
     Type checkUnaryExpr(UnaryExpr& expr);
     Type checkIndexExpr(IndexExpr& expr);
+    Type checkMemberExpr(MemberExpr& expr);
     Type checkCastExpr(CastExpr& expr);
     Type checkIdentExpr(IdentExpr& expr, bool allowSharedArray = false);
     Type checkIntLiteral(IntLiteralExpr& expr, bool negated);

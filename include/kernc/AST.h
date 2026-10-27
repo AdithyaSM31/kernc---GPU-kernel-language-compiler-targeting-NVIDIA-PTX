@@ -10,24 +10,74 @@
 namespace kernc {
 
 struct Type {
-    enum Kind { Void, Int, Float, Ptr, Bool, SharedArray };
+    enum Kind { Void, Int, Float, Bool, Int2, Int4, Float2, Float4, Ptr, SharedArray };
     Kind kind = Void;
     Kind pointeeKind = Void; // element type for Ptr and SharedArray
+
+    Type() = default;
+    Type(Kind k, Kind p = Void) : kind(k), pointeeKind(p) {}
 
     static Type makeVoid() { return {Void, Void}; }
     static Type makeInt() { return {Int, Void}; }
     static Type makeFloat() { return {Float, Void}; }
+    static Type makeBool() { return {Bool, Void}; }
+    static Type makeInt2() { return {Int2, Void}; }
+    static Type makeInt4() { return {Int4, Void}; }
+    static Type makeFloat2() { return {Float2, Void}; }
+    static Type makeFloat4() { return {Float4, Void}; }
     static Type makeIntPtr() { return {Ptr, Int}; }
     static Type makeFloatPtr() { return {Ptr, Float}; }
-    static Type makeBool() { return {Bool, Void}; }
+    static Type makeInt2Ptr() { return {Ptr, Int2}; }
+    static Type makeInt4Ptr() { return {Ptr, Int4}; }
+    static Type makeFloat2Ptr() { return {Ptr, Float2}; }
+    static Type makeFloat4Ptr() { return {Ptr, Float4}; }
+    static Type makePtr(Kind elem) { return {Ptr, elem}; }
     static Type makeSharedArray(Kind elem) { return {SharedArray, elem}; }
 
     bool isVoid() const { return kind == Void; }
     bool isInt() const { return kind == Int; }
     bool isFloat() const { return kind == Float; }
-    bool isPtr() const { return kind == Ptr; }
     bool isBool() const { return kind == Bool; }
+    bool isInt2() const { return kind == Int2; }
+    bool isInt4() const { return kind == Int4; }
+    bool isFloat2() const { return kind == Float2; }
+    bool isFloat4() const { return kind == Float4; }
+    bool isPtr() const { return kind == Ptr; }
     bool isSharedArray() const { return kind == SharedArray; }
+
+    bool isIntVector() const { return kind == Int2 || kind == Int4; }
+    bool isFloatVector() const { return kind == Float2 || kind == Float4; }
+    bool isVector() const { return isIntVector() || isFloatVector(); }
+    int vectorWidth() const {
+        if (kind == Int2 || kind == Float2) return 2;
+        if (kind == Int4 || kind == Float4) return 4;
+        return 1;
+    }
+    Kind vectorElementKind() const {
+        if (isIntVector()) return Int;
+        if (isFloatVector()) return Float;
+        return Void;
+    }
+    Type vectorElementType() const {
+        if (isIntVector()) return makeInt();
+        if (isFloatVector()) return makeFloat();
+        return makeVoid();
+    }
+    int sizeInBytes() const {
+        switch (kind) {
+            case Int:
+            case Float: return 4;
+            case Int2:
+            case Float2: return 8;
+            case Int4:
+            case Float4: return 16;
+            case Ptr: return 8;
+            case Bool: return 1;
+            case SharedArray:
+            case Void: return 0;
+        }
+        return 0;
+    }
 
     bool operator==(const Type& o) const {
         if (kind != o.kind) return false;
@@ -42,12 +92,26 @@ struct Type {
             case Int: return "int";
             case Float: return "float";
             case Bool: return "bool";
+            case Int2: return "int2";
+            case Int4: return "int4";
+            case Float2: return "float2";
+            case Float4: return "float4";
             case Ptr:
                 if (pointeeKind == Int) return "int*";
                 if (pointeeKind == Float) return "float*";
+                if (pointeeKind == Int2) return "int2*";
+                if (pointeeKind == Int4) return "int4*";
+                if (pointeeKind == Float2) return "float2*";
+                if (pointeeKind == Float4) return "float4*";
                 return "ptr";
             case SharedArray:
-                return pointeeKind == Float ? "shared float[]" : "shared int[]";
+                if (pointeeKind == Float) return "shared float[]";
+                if (pointeeKind == Int) return "shared int[]";
+                if (pointeeKind == Int2) return "shared int2[]";
+                if (pointeeKind == Int4) return "shared int4[]";
+                if (pointeeKind == Float2) return "shared float2[]";
+                if (pointeeKind == Float4) return "shared float4[]";
+                return "shared array";
         }
         return "unknown";
     }
@@ -177,6 +241,13 @@ struct IndexExpr : public Expr {
         : base(std::move(b)), index(std::move(idx)) {}
 };
 
+struct MemberExpr : public Expr {
+    std::unique_ptr<Expr> base;
+    std::string member;
+    MemberExpr(std::unique_ptr<Expr> b, std::string m)
+        : base(std::move(b)), member(std::move(m)) {}
+};
+
 struct CastExpr : public Expr {
     Type targetType;
     std::unique_ptr<Expr> operand;
@@ -239,6 +310,36 @@ inline std::optional<AtomicIntrinsic> getAtomicIntrinsic(std::string_view name) 
         name == "atomicCas" || name == "__atomicCas")
         return AtomicIntrinsic::Cas;
     return std::nullopt;
+}
+
+enum class VectorIntrinsic {
+    LoadInt2,
+    LoadInt4,
+    LoadFloat2,
+    LoadFloat4,
+    StoreInt2,
+    StoreInt4,
+    StoreFloat2,
+    StoreFloat4
+};
+
+inline std::optional<VectorIntrinsic> getVectorIntrinsic(std::string_view name) {
+    if (name == "load_int2") return VectorIntrinsic::LoadInt2;
+    if (name == "load_int4") return VectorIntrinsic::LoadInt4;
+    if (name == "load_float2") return VectorIntrinsic::LoadFloat2;
+    if (name == "load_float4") return VectorIntrinsic::LoadFloat4;
+    if (name == "store_int2") return VectorIntrinsic::StoreInt2;
+    if (name == "store_int4") return VectorIntrinsic::StoreInt4;
+    if (name == "store_float2") return VectorIntrinsic::StoreFloat2;
+    if (name == "store_float4") return VectorIntrinsic::StoreFloat4;
+    return std::nullopt;
+}
+
+inline bool isVectorConstructor(std::string_view name) {
+    return name == "int2" || name == "make_int2" ||
+           name == "int4" || name == "make_int4" ||
+           name == "float2" || name == "make_float2" ||
+           name == "float4" || name == "make_float4";
 }
 
 // `f(a, b)`: a call to a device function (`func`) or warp intrinsic, lowered to PTX.

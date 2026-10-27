@@ -66,6 +66,10 @@ enum class IROp {
     // Memory
     Load,
     Store,
+    LoadV2,
+    LoadV4,
+    StoreV2,
+    StoreV4,
     // Address Computation
     MulWide,    // dst:s64 = src1:s32 * src2:s32
     AddS64,     // dst:s64 = src1:s64 + src2:s64
@@ -125,7 +129,8 @@ struct IRInst {
 
     AddrSpace space = AddrSpace::Global; // Load / Store
     std::string symbol;                  // SharedAddr: array symbol; Call: callee name
-    std::vector<VReg> args;              // Call: argument registers, in order
+    std::vector<VReg> args;              // Call: argument registers, in order; StoreV2/V4: values to store
+    std::vector<VReg> dsts;              // LoadV2/V4: destination registers, in order
 
     SourceLocation srcLoc;
 
@@ -154,6 +159,7 @@ struct SharedVar {
     std::string symbol; // unique within the module, e.g. "reduce_sum_sdata"
     IRType elemType;
     int64_t count;
+    int align = 4;
 };
 
 struct IRFunction {

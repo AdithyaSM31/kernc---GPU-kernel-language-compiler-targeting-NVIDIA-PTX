@@ -20,7 +20,9 @@ kernel saxpy(float a, float* x, float* y, int n) {
 
 What it supports:
 
-- `int`, `float` and `bool`; `int*` / `float*` parameters; `shared` arrays
+- `int`, `float`, `bool`, and vector types `int2`, `int4`, `float2`, `float4`; pointers `int*`, `float*`, `int2*`, `int4*`, `float2*`, `float4*`; `shared` arrays with 8/16-byte alignment
+- Vector component access (`.x`, `.y`, `.z`, `.w`), constructors (`int2(...)`, `make_float4(...)`, etc.) with implicit int-to-float promotion, and 64/128-bit vector memory operations (`ld.global.v2/v4`, `st.global.v2/v4`, `ld.shared.v2/v4`, `st.shared.v2/v4`) lowering to hardware SASS `LDG.E.64/128`, `STG.E.64/128`, `LDS.64/128`, `STS.64/128`
+- Vector intrinsics (`load_int2/4`, `load_float2/4`, `store_int2/4`, `store_float2/4`) on scalar and vector buffers
 - 1D, 2D, and 3D execution geometry (`thread_idx[_x|_y|_z]`, `block_idx_*`, `block_dim_*`, `grid_dim_*`, or `.x/.y/.z`)
 - warp-level intrinsics (`shfl_sync`, `shfl_down_sync`, `shfl_up_sync`, `shfl_xor_sync`, `ballot_sync`, `activemask`, with and without `__`)
 - atomic memory operations on global and shared memory (`atom.global`, `atom.shared` for `add`, `sub`, `min`, `max`, `and`, `or`, `xor`, `exch`, `cas`)
@@ -29,11 +31,11 @@ What it supports:
 - short-circuit `&&` / `||`, in conditions and as values
 - explicit `cast<T>()` between `int`, `float` and `bool`
 - bitwise operators (`&`, `|`, `^`, `~`, `<<`, `>>`) on `int` with ISO C precedence
-- constant folding, algebraic simplification, and dead-code elimination
+- constant folding, algebraic simplification, and dead-code elimination (with dead vector load pruning)
 - `.file` / `.loc` source line info with `-lineinfo`
 - diagnostics with `file:line:column` and a caret
 
-The suite has 139 tests, and all of them pass, both in a normal build and under
+The suite has 148 tests, and all of them pass, both in a normal build and under
 UndefinedBehaviorSanitizer.
 
 ---
@@ -106,11 +108,12 @@ The full reference is in [docs/specs/01-scope.md](docs/specs/01-scope.md).
 
 | | |
 |---|---|
-| Types | `int` (`.s32`), `float` (`.f32`), `bool` (`.pred`); `int*` / `float*` as parameters |
+| Types | `int` (`.s32`), `float` (`.f32`), `bool` (`.pred`); vectors `int2`, `int4`, `float2`, `float4`; pointers `int*`, `float*`, `int2*`, `int4*`, `float2*`, `float4*` |
 | Built-ins | `thread_idx[_x\|_y\|_z]`, `block_idx_*`, `block_dim_*`, `grid_dim_*` (or `.x`, `.y`, `.z` / `threadIdx`, etc.) |
-| Intrinsics | Warp: `shfl_sync`, `shfl_down_sync`, `shfl_up_sync`, `shfl_xor_sync`, `ballot_sync`, `activemask`<br>Atomic: `atomic_add`, `atomic_sub`, `atomic_min`, `atomic_max`, `atomic_and`, `atomic_or`, `atomic_xor`, `atomic_exch`, `atomic_cas` (and CUDA camelCase, with/without `__`) |
+| Intrinsics | Warp: `shfl_sync`, `shfl_down_sync`, `shfl_up_sync`, `shfl_xor_sync`, `ballot_sync`, `activemask`<br>Atomic: `atomic_add`, `atomic_sub`, `atomic_min`, `atomic_max`, `atomic_and`, `atomic_or`, `atomic_xor`, `atomic_exch`, `atomic_cas`<br>Vector: `load_int2/4`, `load_float2/4`, `store_int2/4`, `store_float2/4` |
 | Statements | declarations, assignment, `if`/`else`, `while`, `for`, `return`, `barrier();`, `shared T name[N];`, function calls |
-| Operators | `+ - * / %`, unary `- ! ~`, `& \| ^ << >>`, `< <= > >= == !=`, `&&` `\|\|` (short-circuit), `p[i]` |
+| Operators | `+ - * / %`, unary `- ! ~`, `& \| ^ << >>`, `< <= > >= == !=`, `&&` `\|\|` (short-circuit), `p[i]`, vector member `.x .y .z .w` |
+| Constructors | `int2(...)`, `int4(...)`, `float2(...)`, `float4(...)` (and `make_*`) |
 | Casts | `cast<int>(x)`, `cast<float>(x)`, `cast<bool>(x)` |
 
 Rules that matter for correctness:

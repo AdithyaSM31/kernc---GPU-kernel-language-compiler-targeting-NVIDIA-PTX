@@ -50,6 +50,11 @@ bool Optimizer::runConstantFolding(IRFunction& fn) {
             if (inst.dst != 0) {
                 defCount[inst.dst]++;
             }
+            for (VReg d : inst.dsts) {
+                if (d != 0) {
+                    defCount[d]++;
+                }
+            }
         }
     }
 
@@ -462,7 +467,8 @@ bool Optimizer::runDeadCodeElimination(IRFunction& fn) {
         for (auto& bb : fn.blocks) {
             for (auto it = bb.instructions.begin(); it != bb.instructions.end(); ) {
                 // Side-effecting operations
-                if (it->op == IROp::Store || it->op == IROp::Bra ||
+                if (it->op == IROp::Store || it->op == IROp::StoreV2 ||
+                    it->op == IROp::StoreV4 || it->op == IROp::Bra ||
                     it->op == IROp::BraCond || it->op == IROp::Ret ||
                     it->op == IROp::Bar || it->op == IROp::Call ||
                     it->op == IROp::StoreRetval ||
@@ -475,6 +481,24 @@ bool Optimizer::runDeadCodeElimination(IRFunction& fn) {
                     it->op == IROp::AtomicXor || it->op == IROp::AtomicExch ||
                     it->op == IROp::AtomicCas) {
                     ++it;
+                    continue;
+                }
+
+                if (it->op == IROp::LoadV2 || it->op == IROp::LoadV4) {
+                    bool allDead = true;
+                    for (VReg d : it->dsts) {
+                        if (d != 0 && useCount[d] > 0) {
+                            allDead = false;
+                            break;
+                        }
+                    }
+                    if (allDead) {
+                        it = bb.instructions.erase(it);
+                        changed = true;
+                        changedOverall = true;
+                    } else {
+                        ++it;
+                    }
                     continue;
                 }
 

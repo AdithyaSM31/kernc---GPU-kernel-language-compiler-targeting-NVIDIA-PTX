@@ -179,4 +179,28 @@ The IR is a non-SSA 3-address virtual-register code organized into Basic Blocks 
       - PTX ISA `atom.sub` handling: PTX ISA lacks a native `atom.sub` instruction. `PTXEmitter` detects `IROp::AtomicSub` and allocates a dedicated 32-bit scratch register `%r` to perform `neg.s32` before issuing `atom.add.s32`.
       - Optimization semantics: In `Passes.cpp`, all atomic operations are explicitly classified as side-effecting memory operations. Dead Code Elimination (DCE) never eliminates atomic instructions even when their destination register has a use count of zero.
 
+14. **Vector Memory Operations and Types**:
+    - Supported Types: `int2`, `int4`, `float2`, `float4`, pointers (`int2*`, etc.), and shared arrays (`shared int2`, etc.).
+    - Local Vector Variable Lowering:
+      - Vector local variables are represented as a contiguous array of scalar virtual registers in `VarInfo::regs`.
+      - Component extraction (`.x`, `.y`, `.z`, `.w`) and component mutation are zero-cost register selections / moves, eliminating vector packing and unpacking instructions.
+    - IR Opcodes and Structure:
+      - `LoadV2`, `LoadV4`: Load 2 or 4 elements from global or shared memory into multiple destination virtual registers stored in `inst.dsts`.
+      - `StoreV2`, `StoreV4`: Store 2 or 4 elements from arguments stored in `inst.args` into global or shared memory.
+    - Addressing and Alignment:
+      - Vector global addresses scale the index by `elemType.sizeInBytes()` (8 bytes for v2, 16 bytes for v4) using 64-bit address arithmetic (`mul.wide.s32` and `add.s64`).
+      - Shared vector arrays are emitted with explicit alignment: `.shared .align 8 .<type>` for v2, `.shared .align 16 .<type>` for v4.
+    - PTX Lowering:
+      - Lowers directly to PTX vector load/store instructions:
+        - `ld.{global|shared}.v2.{s32|f32} {%d0, %d1}, [addr];`
+        - `ld.{global|shared}.v4.{s32|f32} {%d0, %d1, %d2, %d3}, [addr];`
+        - `st.{global|shared}.v2.{s32|f32} [addr], {%s0, %s1};`
+        - `st.{global|shared}.v4.{s32|f32} [addr], {%s0, %s1, %s2, %s3};`
+    - SASS Hardware Lowering on `sm_86`:
+      - `ptxas` lowers `LoadV4`/`StoreV4` to 128-bit memory instructions: `LDG.E.128` / `STG.E.128` (global) and `LDS.128` / `STS.128` (shared).
+      - `ptxas` lowers `LoadV2`/`StoreV2` to 64-bit memory instructions: `LDG.E.64` / `STG.E.64` (global) and `LDS.64` / `STS.64` (shared).
+    - Optimizer (DCE) Integration:
+      - `StoreV2` and `StoreV4` are classified as side-effecting memory operations and are never removed by DCE.
+      - `LoadV2` and `LoadV4` track use counts across all destination registers in `inst.dsts`. A vector load is pruned by DCE if and only if every destination register is unused (`useCount == 0`). If at least one component is live, the vector load is preserved.
+
 

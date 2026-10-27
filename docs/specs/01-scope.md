@@ -8,11 +8,30 @@
 ### Data Types
 - `int`: 32-bit signed integer (`.s32` in PTX).
 - `float`: 32-bit IEEE-754 single-precision floating point (`.f32` in PTX).
-- Pointers: `int*` and `float*` (valid as kernel and device function parameters).
+- Vector types:
+  - `int2`: 2-element vector of `int` (8 bytes, 8-byte aligned).
+  - `int4`: 4-element vector of `int` (16 bytes, 16-byte aligned).
+  - `float2`: 2-element vector of `float` (8 bytes, 8-byte aligned).
+  - `float4`: 4-element vector of `float` (16 bytes, 16-byte aligned).
+- Pointers: `int*`, `float*`, `int2*`, `int4*`, `float2*`, `float4*` (valid as kernel and device function parameters). Pointer indexing scales by the pointee size (4, 8, or 16 bytes).
+- Shared arrays: `shared int`, `shared float`, `shared int2`, `shared int4`, `shared float2`, `shared float4`. Declared with explicit static size `[N]`. Vector shared arrays are aligned to 8 or 16 bytes (`.align 8` / `.align 16`).
 - `bool`: `true` / `false`, held in `.pred` registers. Comparisons and `!`, `&&`, `||` produce
   `bool`. It does not convert implicitly to or from `int`/`float` (use `cast<>`), cannot be a
   kernel parameter (`.param` has no predicate type; pass an `int`), and has no pointer type.
   Conditions (`if`, `while`, `for`, `!`, `&&`, `||`) accept `bool` or `int` (non-zero is true).
+
+### Vector Component Access & Constructors
+- Component access:
+  - 2-element vectors support `.x` and `.y`.
+  - 4-element vectors support `.x`, `.y`, `.z`, and `.w`.
+  - Valid as rvalues (`v.x`, `p[i].y`) and lvalues (`v.x = expr;`, `p[i].z = expr;`).
+  - Accessing invalid components (e.g., `v2.z` or `v.a`) is a compile-time error.
+- Constructors:
+  - `int2(x, y)` / `make_int2(x, y)`
+  - `int4(x, y, z, w)` / `make_int4(x, y, z, w)`
+  - `float2(x, y)` / `make_float2(x, y)`
+  - `float4(x, y, z, w)` / `make_float4(x, y, z, w)`
+  - Arguments accept matching element types with implicit promotion from `int` to `float` for float vectors. Argument count mismatch or incompatible types produce compile-time errors.
 
 ### Literals
 - Integers: Decimal (`0`, `42`, `1000`) and hexadecimal (`0x10`, `0xFF`).
@@ -128,5 +147,22 @@ Type rules in `Sema`:
 - `index`, `cmp`, and bitwise `val` operands must be `int`.
 - Returns the old (prior) value at the specified memory location; can be consumed as an expression or used as an expression statement.
 - Intrinsic names are reserved identifiers and cannot be shadowed or redefined.
+
+### Vector Memory Intrinsics
+`kernc` provides explicit helper intrinsics for loading and storing vectorized data:
+- `load_int2(ptr, offset)` -> `int2`
+- `load_int4(ptr, offset)` -> `int4`
+- `load_float2(ptr, offset)` -> `float2`
+- `load_float4(ptr, offset)` -> `float4`
+- `store_int2(ptr, offset, val)`
+- `store_int4(ptr, offset, val)`
+- `store_float2(ptr, offset, val)`
+- `store_float4(ptr, offset, val)`
+
+Semantics and Type Rules:
+- `ptr`: accepts scalar pointers (`int*`, `float*`), vector pointers (`int2*`, `int4*`, `float2*`, `float4*`), and shared memory arrays (`shared int`, `shared float`, `shared int2`, etc.).
+- `offset`: integer element offset. Addressing scales according to the pointee type of `ptr` (`sizeof(*ptr)`: 4 bytes for scalar buffers, 8 bytes for v2 buffers, 16 bytes for v4 buffers), allowing programmers to seamlessly vectorize raw scalar pointer buffers without pointer casts.
+- `val`: matching vector type (`int2`/`int4`/`float2`/`float4`).
+- Intrinsic names are reserved identifiers and cannot be shadowed.
 
 
