@@ -23,6 +23,7 @@ static bool returnsOnAllPaths(const Stmt& stmt) {
 
 static bool isReservedBuiltinName(std::string_view name) {
     if (getWarpIntrinsic(name).has_value()) return true;
+    if (getAtomicIntrinsic(name).has_value()) return true;
     return name == "thread_idx"   || name == "threadIdx"   ||
            name == "thread_idx_x" || name == "thread_idx_y" || name == "thread_idx_z" ||
            name == "block_idx"    || name == "blockIdx"    ||
@@ -37,7 +38,7 @@ bool Sema::checkProgram(Program& program) {
     functions_.clear();
     bool ok = true;
     for (auto& func : program.functions) {
-        if (getWarpIntrinsic(func->name)) {
+        if (getWarpIntrinsic(func->name) || getAtomicIntrinsic(func->name)) {
             diag_.error(func->range.begin, "cannot redefine intrinsic '" + func->name + "' as a " +
                         (func->isKernel ? "kernel" : "function"));
             ok = false;
@@ -444,6 +445,125 @@ Type Sema::checkCallExpr(CallExpr& expr, bool isExprStmt) {
                                 "' must be 'int', got '" + arg3Ty.toString() + "'");
                 }
                 expr.resolvedType = valTy.isFloat() ? Type::makeFloat() : Type::makeInt();
+                return expr.resolvedType;
+            }
+        }
+    }
+
+    if (auto atomic = getAtomicIntrinsic(expr.callee)) {
+        bool isCas = (*atomic == AtomicIntrinsic::Cas);
+        size_t minArgs = isCas ? 3 : 2;
+        size_t maxArgs = isCas ? 4 : 3;
+
+        if (expr.args.size() < minArgs || expr.args.size() > maxArgs) {
+            diag_.error(expr.range.begin, "intrinsic '" + expr.callee + "' expects " +
+                        (isCas ? "3 or 4" : "2 or 3") + " argument(s), got " +
+                        std::to_string(expr.args.size()));
+            for (auto& a : expr.args) checkExpr(*a);
+            expr.resolvedType = Type::makeInt();
+            return expr.resolvedType;
+        }
+
+        bool arg0IsIndex = dynamic_cast<IndexExpr*>(expr.args[0].get()) != nullptr;
+        if (expr.args.size() == maxArgs && arg0IsIndex) {
+            diag_.error(expr.range.begin, "intrinsic '" + expr.callee + "' with subscripted pointer expects " +
+                        std::to_string(minArgs) + " argument(s), got " + std::to_string(maxArgs));
+            for (auto& a : expr.args) checkExpr(*a);
+            expr.resolvedType = Type::makeInt();
+            return expr.resolvedType;
+        }
+
+        Type pointeeType = Type::makeVoid();
+        if (auto* idxExpr = dynamic_cast<IndexExpr*>(expr.args[0].get())) {
+            pointeeType = checkIndexExpr(*idxExpr);
+        } else {
+            Type ptrTy = Type::makeVoid();
+            if (auto* ident = dynamic_cast<IdentExpr*>(expr.args[0].get())) {
+                ptrTy = checkIdentExpr(*ident, /*allowSharedArray=*/true);
+            } else {
+                ptrTy = checkExpr(*expr.args[0]);
+            }
+
+            if (!ptrTy.isVoid() && !ptrTy.isPtr() && !ptrTy.isSharedArray()) {
+                diag_.error(expr.args[0]->range.begin, "argument 1 ('ptr') of '" + expr.callee +
+                            "' must be a pointer or shared array, got '" + ptrTy.toString() + "'");
+            } else if (!ptrTy.isVoid()) {
+                pointeeType = (ptrTy.pointeeKind == Type::Float) ? Type::makeFloat() : Type::makeInt();
+            }
+
+            if (expr.args.size() == maxArgs) {
+                Type idxTy = checkExpr(*expr.args[1]);
+                if (!idxTy.isVoid() && !idxTy.isInt()) {
+                    diag_.error(expr.args[1]->range.begin, "argument 2 ('index') of '" + expr.callee +
+                                "' must be 'int', got '" + idxTy.toString() + "'");
+                }
+            }
+        }
+
+        switch (*atomic) {
+            case AtomicIntrinsic::Add:
+            case AtomicIntrinsic::Exch: {
+                size_t valIdx = expr.args.size() - 1;
+                Type valTy = checkExpr(*expr.args[valIdx]);
+                if (pointeeType.isFloat()) {
+                    if (!valTy.isVoid() && !valTy.isFloat() && !valTy.isInt()) {
+                        diag_.error(expr.args[valIdx]->range.begin, "argument " + std::to_string(valIdx + 1) +
+                                    " ('val') of '" + expr.callee + "' must be 'float' or 'int', got '" +
+                                    valTy.toString() + "'");
+                    }
+                    expr.resolvedType = Type::makeFloat();
+                } else {
+                    if (!valTy.isVoid() && !valTy.isInt()) {
+                        diag_.error(expr.args[valIdx]->range.begin, "argument " + std::to_string(valIdx + 1) +
+                                    " ('val') of '" + expr.callee + "' must be 'int', got '" +
+                                    valTy.toString() + "'");
+                    }
+                    expr.resolvedType = Type::makeInt();
+                }
+                return expr.resolvedType;
+            }
+
+            case AtomicIntrinsic::Sub:
+            case AtomicIntrinsic::Min:
+            case AtomicIntrinsic::Max:
+            case AtomicIntrinsic::And:
+            case AtomicIntrinsic::Or:
+            case AtomicIntrinsic::Xor: {
+                if (pointeeType.isFloat()) {
+                    diag_.error(expr.args[0]->range.begin, "intrinsic '" + expr.callee +
+                                "' does not support 'float' memory operand");
+                }
+                size_t valIdx = expr.args.size() - 1;
+                Type valTy = checkExpr(*expr.args[valIdx]);
+                if (!valTy.isVoid() && !valTy.isInt()) {
+                    diag_.error(expr.args[valIdx]->range.begin, "argument " + std::to_string(valIdx + 1) +
+                                " ('val') of '" + expr.callee + "' must be 'int', got '" +
+                                valTy.toString() + "'");
+                }
+                expr.resolvedType = Type::makeInt();
+                return expr.resolvedType;
+            }
+
+            case AtomicIntrinsic::Cas: {
+                if (pointeeType.isFloat()) {
+                    diag_.error(expr.args[0]->range.begin, "intrinsic '" + expr.callee +
+                                "' does not support 'float' memory operand");
+                }
+                size_t cmpIdx = expr.args.size() - 2;
+                size_t valIdx = expr.args.size() - 1;
+                Type cmpTy = checkExpr(*expr.args[cmpIdx]);
+                if (!cmpTy.isVoid() && !cmpTy.isInt()) {
+                    diag_.error(expr.args[cmpIdx]->range.begin, "argument " + std::to_string(cmpIdx + 1) +
+                                " ('cmp') of '" + expr.callee + "' must be 'int', got '" +
+                                cmpTy.toString() + "'");
+                }
+                Type valTy = checkExpr(*expr.args[valIdx]);
+                if (!valTy.isVoid() && !valTy.isInt()) {
+                    diag_.error(expr.args[valIdx]->range.begin, "argument " + std::to_string(valIdx + 1) +
+                                " ('val') of '" + expr.callee + "' must be 'int', got '" +
+                                valTy.toString() + "'");
+                }
+                expr.resolvedType = Type::makeInt();
                 return expr.resolvedType;
             }
         }

@@ -110,10 +110,14 @@ std::string PTXEmitter::emitModule(const IRModule& mod) {
 std::string PTXEmitter::emitFunction(const IRFunction& fn) {
     RegAllocator alloc;
 
+    bool hasAtomicSub = false;
     // Pass 1: Pre-allocate all registers to know counts. Each register's PTX class comes
     // from the type IRGen recorded when it was created, never from the instruction using it.
     for (const auto& bb : fn.blocks) {
         for (const auto& inst : bb.instructions) {
+            if (inst.op == IROp::AtomicSub) {
+                hasAtomicSub = true;
+            }
             for (VReg reg : {inst.dst, inst.src1, inst.src2, inst.src3}) {
                 if (reg != 0) {
                     alloc.getOrAlloc(reg, fn.regType(reg));
@@ -125,6 +129,11 @@ std::string PTXEmitter::emitFunction(const IRFunction& fn) {
                 }
             }
         }
+    }
+
+    std::string subScratch;
+    if (hasAtomicSub) {
+        subScratch = "%r" + std::to_string(alloc.countR++);
     }
 
     std::ostringstream ss;
@@ -447,6 +456,55 @@ std::string PTXEmitter::emitFunction(const IRFunction& fn) {
                 case IROp::Activemask:
                     ss << "    activemask.b32 " << dst << ";\n";
                     break;
+
+                // Atomic Memory Operations
+                case IROp::AtomicAdd: {
+                    const char* space = inst.space == AddrSpace::Shared ? "shared" : "global";
+                    const char* ty = inst.type == IRType::F32 ? "f32" : "s32";
+                    ss << "    atom." << space << ".add." << ty << " " << dst << ", [" << s1 << "], " << s2 << ";\n";
+                    break;
+                }
+                case IROp::AtomicSub: {
+                    const char* space = inst.space == AddrSpace::Shared ? "shared" : "global";
+                    ss << "    neg.s32 " << subScratch << ", " << s2 << ";\n";
+                    ss << "    atom." << space << ".add.s32 " << dst << ", [" << s1 << "], " << subScratch << ";\n";
+                    break;
+                }
+                case IROp::AtomicMin: {
+                    const char* space = inst.space == AddrSpace::Shared ? "shared" : "global";
+                    ss << "    atom." << space << ".min.s32 " << dst << ", [" << s1 << "], " << s2 << ";\n";
+                    break;
+                }
+                case IROp::AtomicMax: {
+                    const char* space = inst.space == AddrSpace::Shared ? "shared" : "global";
+                    ss << "    atom." << space << ".max.s32 " << dst << ", [" << s1 << "], " << s2 << ";\n";
+                    break;
+                }
+                case IROp::AtomicAnd: {
+                    const char* space = inst.space == AddrSpace::Shared ? "shared" : "global";
+                    ss << "    atom." << space << ".and.b32 " << dst << ", [" << s1 << "], " << s2 << ";\n";
+                    break;
+                }
+                case IROp::AtomicOr: {
+                    const char* space = inst.space == AddrSpace::Shared ? "shared" : "global";
+                    ss << "    atom." << space << ".or.b32 " << dst << ", [" << s1 << "], " << s2 << ";\n";
+                    break;
+                }
+                case IROp::AtomicXor: {
+                    const char* space = inst.space == AddrSpace::Shared ? "shared" : "global";
+                    ss << "    atom." << space << ".xor.b32 " << dst << ", [" << s1 << "], " << s2 << ";\n";
+                    break;
+                }
+                case IROp::AtomicExch: {
+                    const char* space = inst.space == AddrSpace::Shared ? "shared" : "global";
+                    ss << "    atom." << space << ".exch.b32 " << dst << ", [" << s1 << "], " << s2 << ";\n";
+                    break;
+                }
+                case IROp::AtomicCas: {
+                    const char* space = inst.space == AddrSpace::Shared ? "shared" : "global";
+                    ss << "    atom." << space << ".cas.b32 " << dst << ", [" << s1 << "], " << s2 << ", " << s3 << ";\n";
+                    break;
+                }
             }
         }
     }

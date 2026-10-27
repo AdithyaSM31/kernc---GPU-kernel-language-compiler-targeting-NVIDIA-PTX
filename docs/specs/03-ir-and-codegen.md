@@ -159,3 +159,24 @@ The IR is a non-SSA 3-address virtual-register code organized into Basic Blocks 
       - Register scanner in `PTXEmitter` and register use counter in `Passes` account for 3-input operands via `IRInst::src3`.
       - Default clamps (31 for idx/down/bfly, 0 for up) are stored on `IRInst::immInt` upon instruction construction and emitted directly into PTX.
 
+13. **Atomic Memory Operations (`atom.global`, `atom.shared`)**:
+    - Hardware atomic read-modify-write memory transactions across global and shared address spaces.
+    - IR Opcode mapping:
+      - `atomic_add` -> `IROp::AtomicAdd` -> `atom.{global|shared}.add.{s32|f32} dst, [addr], val;`
+      - `atomic_sub` -> `IROp::AtomicSub` -> `neg.s32 %scratch, val; atom.{global|shared}.add.s32 dst, [addr], %scratch;`
+      - `atomic_min` -> `IROp::AtomicMin` -> `atom.{global|shared}.min.s32 dst, [addr], val;`
+      - `atomic_max` -> `IROp::AtomicMax` -> `atom.{global|shared}.max.s32 dst, [addr], val;`
+      - `atomic_and` -> `IROp::AtomicAnd` -> `atom.{global|shared}.and.b32 dst, [addr], val;`
+      - `atomic_or`  -> `IROp::AtomicOr`  -> `atom.{global|shared}.or.b32 dst, [addr], val;`
+      - `atomic_xor` -> `IROp::AtomicXor` -> `atom.{global|shared}.xor.b32 dst, [addr], val;`
+      - `atomic_exch`-> `IROp::AtomicExch`-> `atom.{global|shared}.exch.b32 dst, [addr], val;`
+      - `atomic_cas` -> `IROp::AtomicCas` -> `atom.{global|shared}.cas.b32 dst, [addr], cmp, val;`
+    - Lowering Architecture and Addressing:
+      - Address generation is unified in `emitMemoryAddress`:
+        - Global memory pointers use 64-bit addresses: widened index multiplication `mul.wide.s32` followed by 64-bit addition `add.s64` onto the base pointer `%rd`.
+        - Shared memory arrays use 32-bit window offsets: base symbol resolution `mov.u32` followed by 32-bit arithmetic `mul.lo.s32` and `add.s32`.
+      - Return Value: Every PTX `atom` instruction writes the old value at the target memory location into `dst`. `kernc` assigns this destination register to the calling expression's result.
+      - PTX ISA `atom.sub` handling: PTX ISA lacks a native `atom.sub` instruction. `PTXEmitter` detects `IROp::AtomicSub` and allocates a dedicated 32-bit scratch register `%r` to perform `neg.s32` before issuing `atom.add.s32`.
+      - Optimization semantics: In `Passes.cpp`, all atomic operations are explicitly classified as side-effecting memory operations. Dead Code Elimination (DCE) never eliminates atomic instructions even when their destination register has a use count of zero.
+
+

@@ -1,0 +1,111 @@
+// Regression test: atomic memory operations compiled at -O0 and -O1.
+// Exercises global and shared memory atomics: add, sub, min, max, and, or, xor, exch, cas
+// with snake_case and CUDA camelCase, with and without __ prefix.
+
+kernel test_regress_atomics(int* out_i, float* out_f, int* g_i, float* g_f, int n) {
+    shared int s_i[64];
+    shared float s_f[64];
+
+    int i = block_idx * block_dim + thread_idx;
+    if (i < n) {
+        // Global memory atomic operations
+        atomic_add(g_i, 1);
+        __atomic_add(g_i, 0, 1);
+        atomicAdd(g_i[i], 1);
+        __atomicAdd(g_i, i, 1);
+
+        atomic_sub(g_i, 1);
+        __atomic_sub(g_i, 0, 1);
+        atomicSub(g_i[i], 1);
+        __atomicSub(g_i, i, 1);
+
+        atomic_min(g_i, 10);
+        __atomic_min(g_i, 0, 10);
+        atomicMin(g_i[i], 10);
+        __atomicMin(g_i, i, 10);
+
+        atomic_max(g_i, 20);
+        __atomic_max(g_i, 0, 20);
+        atomicMax(g_i[i], 20);
+        __atomicMax(g_i, i, 20);
+
+        atomic_and(g_i, 0xFF);
+        __atomic_and(g_i, 0, 0xFF);
+        atomicAnd(g_i[i], 0xFF);
+        __atomicAnd(g_i, i, 0xFF);
+
+        atomic_or(g_i, 0x10);
+        __atomic_or(g_i, 0, 0x10);
+        atomicOr(g_i[i], 0x10);
+        __atomicOr(g_i, i, 0x10);
+
+        atomic_xor(g_i, 0x01);
+        __atomic_xor(g_i, 0, 0x01);
+        atomicXor(g_i[i], 0x01);
+        __atomicXor(g_i, i, 0x01);
+
+        int old_exch_i = atomic_exch(g_i, 42);
+        int old_exch_i2 = atomicExch(g_i[i], 42);
+        out_i[i] = old_exch_i + old_exch_i2;
+
+        float old_exch_f = atomic_exch(g_f, 1.5);
+        float old_exch_f2 = atomicExch(g_f[i], 2.5);
+        out_f[i] = old_exch_f + old_exch_f2;
+
+        float old_f_add = atomic_add(g_f, 3.5);
+        float old_f_add2 = atomicAdd(g_f[i], 4.5);
+        out_f[i] = out_f[i] + old_f_add + old_f_add2;
+
+        int old_cas1 = atomic_cas(g_i, 0, 1);
+        int old_cas2 = atomicCAS(g_i, i, 0, 1);
+        int old_cas3 = __atomic_cas(g_i[i], 0, 1);
+        out_i[i] = out_i[i] + old_cas1 + old_cas2 + old_cas3;
+
+        // Shared memory atomic operations
+        int tid = thread_idx % 64;
+        atomic_add(s_i, 1);
+        __atomic_add(s_i, tid, 1);
+        atomicAdd(s_i[tid], 1);
+
+        atomic_sub(s_i, 1);
+        atomicSub(s_i, tid, 1);
+        __atomicSub(s_i[tid], 1);
+
+        atomic_min(s_i, 10);
+        atomicMin(s_i, tid, 10);
+        __atomicMin(s_i[tid], 10);
+
+        atomic_max(s_i, 20);
+        atomicMax(s_i, tid, 20);
+        __atomicMax(s_i[tid], 20);
+
+        atomic_and(s_i, 0xFF);
+        atomicAnd(s_i, tid, 0xFF);
+        __atomicAnd(s_i[tid], 0xFF);
+
+        atomic_or(s_i, 0x10);
+        atomicOr(s_i, tid, 0x10);
+        __atomicOr(s_i[tid], 0x10);
+
+        atomic_xor(s_i, 0x01);
+        atomicXor(s_i, tid, 0x01);
+        __atomicXor(s_i[tid], 0x01);
+
+        int old_s_exch = atomic_exch(s_i, 99);
+        int old_s_exch2 = atomicExch(s_i[tid], 99);
+        out_i[i] = out_i[i] + old_s_exch + old_s_exch2;
+
+        float old_sf_add = atomic_add(s_f, 1.25);
+        float old_sf_add2 = atomicAdd(s_f[tid], 2.25);
+        out_f[i] = out_f[i] + old_sf_add + old_sf_add2;
+
+        float old_sf_exch = atomic_exch(s_f, 3.25);
+        float old_sf_exch2 = atomicExch(s_f[tid], 4.25);
+        out_f[i] = out_f[i] + old_sf_exch + old_sf_exch2;
+
+        int old_s_cas1 = atomic_cas(s_i, 0, 1);
+        int old_s_cas2 = atomicCAS(s_i, tid, 0, 1);
+        int old_s_cas3 = __atomicCAS(s_i[tid], 0, 1);
+        out_i[i] = out_i[i] + old_s_cas1 + old_s_cas2 + old_s_cas3;
+    }
+}

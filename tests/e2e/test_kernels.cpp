@@ -1380,6 +1380,368 @@ TEST_F(KernelE2ETest, WarpIntrinsicsMatchCpu) {
     }
 }
 
+TEST_F(KernelE2ETest, AtomicOperationsMatchCpu) {
+    std::string src =
+        "func int dev_atomic_add(int* p, int val) {\n"
+        "    return atomic_add(p, val);\n"
+        "}\n"
+        "\n"
+        "kernel test_atomics_e2e(\n"
+        "    int* d_counter, float* d_counter_f, int* d_hist,\n"
+        "    int* d_tickets, int* d_sub, int* d_min, int* d_max,\n"
+        "    int* d_and, int* d_or, int* d_xor,\n"
+        "    int* d_exch_i, float* d_exch_f,\n"
+        "    int* out_old_exch_i, float* out_old_exch_f,\n"
+        "    int* d_cas_winner, int* d_cas_success,\n"
+        "    int* d_dev_counter,\n"
+        "    int* out_shared_sum, float* out_shared_sum_f,\n"
+        "    int* out_shared_cas_winners, int* out_shared_min, int* out_shared_max,\n"
+        "    int* out_shared_sub, int* out_shared_bitwise, int* out_shared_exch,\n"
+        "    int n\n"
+        ") {\n"
+        "    shared int s_counter[16];\n"
+        "    shared float s_counter_f[16];\n"
+        "    shared int s_min[1];\n"
+        "    shared int s_max[1];\n"
+        "    shared int s_cas_winner[1];\n"
+        "    shared int s_sub[1];\n"
+        "    shared int s_bitwise[3];\n"
+        "    shared int s_exch[1];\n"
+        "    shared float s_exch_f[1];\n"
+        "    shared int s_old_exch[1];\n"
+        "\n"
+        "    int tid = thread_idx;\n"
+        "    int gid = block_idx * block_dim + thread_idx;\n"
+        "\n"
+        "    if (tid < 16) {\n"
+        "        s_counter[tid] = 0;\n"
+        "        s_counter_f[tid] = 0.0;\n"
+        "    }\n"
+        "    if (tid == 0) {\n"
+        "        s_min[0] = 999999;\n"
+        "        s_max[0] = -999999;\n"
+        "        s_cas_winner[0] = 0;\n"
+        "        s_sub[0] = 256;\n"
+        "        s_bitwise[0] = 0;\n"
+        "        s_bitwise[1] = 0xFFFFFFFF;\n"
+        "        s_bitwise[2] = 0xAAAAAAAA;\n"
+        "        s_exch[0] = 777;\n"
+        "        s_exch_f[0] = 33.5;\n"
+        "        s_old_exch[0] = 0;\n"
+        "    }\n"
+        "    barrier();\n"
+        "\n"
+        "    if (gid < n) {\n"
+        "        // 1. Global atomic add (int and float) with ticket collection verifying old value\n"
+        "        int ticket = atomic_add(d_counter, 1);\n"
+        "        d_tickets[ticket] = 1;\n"
+        "        atomic_add(d_counter_f, 1.0);\n"
+        "        atomic_add(d_hist, gid % 16, 1);\n"
+        "\n"
+        "        // 2. Global atomic sub\n"
+        "        atomic_sub(d_sub, 2);\n"
+        "\n"
+        "        // 3. Global atomic min / max\n"
+        "        atomic_min(d_min, gid * 7 + 13);\n"
+        "        atomic_max(d_max, gid * 7 + 13);\n"
+        "\n"
+        "        // 4. Global bitwise atomics (xor flips all 32 bits from 0xAAAAAAAA to 0x55555555)\n"
+        "        if (gid < 32) {\n"
+        "            atomic_or(d_or, 1 << gid);\n"
+        "            atomic_xor(d_xor, 1 << gid);\n"
+        "        }\n"
+        "        atomic_and(d_and, ~(1 << (gid % 32)));\n"
+        "\n"
+        "        // 5. Global atomic exch returning prior values\n"
+        "        if (gid == 0) {\n"
+        "            out_old_exch_i[0] = atomic_exch(d_exch_i, 12345);\n"
+        "            out_old_exch_f[0] = atomic_exch(d_exch_f, 98.75);\n"
+        "        }\n"
+        "\n"
+        "        // 6. Global atomic CAS\n"
+        "        int old_cas = atomic_cas(d_cas_winner, 0, gid + 1);\n"
+        "        if (old_cas == 0) {\n"
+        "            atomic_add(d_cas_success, 1);\n"
+        "        }\n"
+        "\n"
+        "        // 7. Device function calling atomic\n"
+        "        dev_atomic_add(d_dev_counter, 1);\n"
+        "\n"
+        "        // 8. Shared memory atomics: add, sub, min, max, or, and, xor, exch, cas\n"
+        "        atomic_add(s_counter, tid % 16, 1);\n"
+        "        atomic_add(s_counter_f, tid % 16, 1.0);\n"
+        "        atomic_min(s_min, tid + 1);\n"
+        "        atomic_max(s_max, tid + 1);\n"
+        "        atomic_sub(s_sub, 1);\n"
+        "\n"
+        "        if (tid < 32) {\n"
+        "            atomic_or(s_bitwise, 0, 1 << tid);\n"
+        "            atomic_and(s_bitwise, 1, ~(1 << tid));\n"
+        "            atomic_xor(s_bitwise, 2, 1 << tid);\n"
+        "        }\n"
+        "\n"
+        "        if (tid == 0) {\n"
+        "            s_old_exch[0] = atomic_exch(s_exch, 888);\n"
+        "            atomic_exch(s_exch_f, 55.5);\n"
+        "        }\n"
+        "\n"
+        "        int s_old = atomic_cas(s_cas_winner, 0, tid + 1);\n"
+        "        if (s_old == 0) {\n"
+        "            atomic_add(out_shared_cas_winners, 1);\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "    barrier();\n"
+        "\n"
+        "    // Accumulate shared results to global\n"
+        "    if (gid < n) {\n"
+        "        if (tid < 16) {\n"
+        "            atomic_add(out_shared_sum, tid, s_counter[tid]);\n"
+        "            atomic_add(out_shared_sum_f, tid, s_counter_f[tid]);\n"
+        "        }\n"
+        "        if (tid == 0) {\n"
+        "            atomic_min(out_shared_min, s_min[0]);\n"
+        "            atomic_max(out_shared_max, s_max[0]);\n"
+        "            atomic_add(out_shared_sub, s_sub[0]);\n"
+        "            atomic_add(out_shared_bitwise, 0, s_bitwise[0]);\n"
+        "            atomic_add(out_shared_bitwise, 1, s_bitwise[1]);\n"
+        "            atomic_add(out_shared_bitwise, 2, s_bitwise[2]);\n"
+        "            atomic_add(out_shared_exch, s_exch[0] + s_old_exch[0]);\n"
+        "        }\n"
+        "    }\n"
+        "}\n";
+
+    constexpr int kNumBlocks = 16;
+    constexpr int kBlockSize = 256;
+    constexpr int N = kNumBlocks * kBlockSize; // 4096 threads in parallel
+
+    for (bool optimize : {false, true}) {
+        std::string optName = optimize ? "-O1" : "-O0";
+        std::string ptx = compileSourceToPTX(src, optimize);
+        ASSERT_FALSE(ptx.empty()) << optName;
+
+        CUmodule mod = loadPTX(ptx);
+        ASSERT_NE(mod, nullptr) << optName;
+
+        CUfunction func;
+        CHECK_CUDA(cuModuleGetFunction(&func, mod, "test_atomics_e2e"));
+
+        // Host buffers and initialization
+        int32_t h_counter = 0;
+        float h_counter_f = 0.0f;
+        std::vector<int32_t> h_hist(16, 0);
+        std::vector<int32_t> h_tickets(N, 0);
+        int32_t h_sub = 10000;
+        int32_t h_min = 999999;
+        int32_t h_max = -999999;
+        int32_t h_and = static_cast<int32_t>(0xFFFFFFFF);
+        int32_t h_or = 0;
+        int32_t h_xor = static_cast<int32_t>(0xAAAAAAAA);
+        int32_t h_exch_i = -42;
+        float h_exch_f = 3.14159f;
+        int32_t h_out_old_exch_i = 0;
+        float h_out_old_exch_f = 0.0f;
+        int32_t h_cas_winner = 0;
+        int32_t h_cas_success = 0;
+        int32_t h_dev_counter = 0;
+        std::vector<int32_t> h_out_shared_sum(16, 0);
+        std::vector<float> h_out_shared_sum_f(16, 0.0f);
+        int32_t h_out_shared_cas_winners = 0;
+        int32_t h_out_shared_min = 999999;
+        int32_t h_out_shared_max = -999999;
+        int32_t h_out_shared_sub = 0;
+        std::vector<int32_t> h_out_shared_bitwise(3, 0);
+        int32_t h_out_shared_exch = 0;
+
+        // Device pointers
+        CUdeviceptr d_counter, d_counter_f, d_hist, d_tickets;
+        CUdeviceptr d_sub, d_min, d_max;
+        CUdeviceptr d_and, d_or, d_xor;
+        CUdeviceptr d_exch_i, d_exch_f;
+        CUdeviceptr d_out_old_exch_i, d_out_old_exch_f;
+        CUdeviceptr d_cas_winner, d_cas_success;
+        CUdeviceptr d_dev_counter;
+        CUdeviceptr d_out_shared_sum, d_out_shared_sum_f;
+        CUdeviceptr d_out_shared_cas_winners, d_out_shared_min, d_out_shared_max;
+        CUdeviceptr d_out_shared_sub, d_out_shared_bitwise, d_out_shared_exch;
+
+        CHECK_CUDA(cuMemAlloc(&d_counter, sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_counter_f, sizeof(float)));
+        CHECK_CUDA(cuMemAlloc(&d_hist, 16 * sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_tickets, N * sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_sub, sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_min, sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_max, sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_and, sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_or, sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_xor, sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_exch_i, sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_exch_f, sizeof(float)));
+        CHECK_CUDA(cuMemAlloc(&d_out_old_exch_i, sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_out_old_exch_f, sizeof(float)));
+        CHECK_CUDA(cuMemAlloc(&d_cas_winner, sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_cas_success, sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_dev_counter, sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_out_shared_sum, 16 * sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_out_shared_sum_f, 16 * sizeof(float)));
+        CHECK_CUDA(cuMemAlloc(&d_out_shared_cas_winners, sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_out_shared_min, sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_out_shared_max, sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_out_shared_sub, sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_out_shared_bitwise, 3 * sizeof(int32_t)));
+        CHECK_CUDA(cuMemAlloc(&d_out_shared_exch, sizeof(int32_t)));
+
+        CHECK_CUDA(cuMemcpyHtoD(d_counter, &h_counter, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_counter_f, &h_counter_f, sizeof(float)));
+        CHECK_CUDA(cuMemcpyHtoD(d_hist, h_hist.data(), 16 * sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_tickets, h_tickets.data(), N * sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_sub, &h_sub, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_min, &h_min, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_max, &h_max, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_and, &h_and, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_or, &h_or, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_xor, &h_xor, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_exch_i, &h_exch_i, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_exch_f, &h_exch_f, sizeof(float)));
+        CHECK_CUDA(cuMemcpyHtoD(d_out_old_exch_i, &h_out_old_exch_i, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_out_old_exch_f, &h_out_old_exch_f, sizeof(float)));
+        CHECK_CUDA(cuMemcpyHtoD(d_cas_winner, &h_cas_winner, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_cas_success, &h_cas_success, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_dev_counter, &h_dev_counter, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_out_shared_sum, h_out_shared_sum.data(), 16 * sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_out_shared_sum_f, h_out_shared_sum_f.data(), 16 * sizeof(float)));
+        CHECK_CUDA(cuMemcpyHtoD(d_out_shared_cas_winners, &h_out_shared_cas_winners, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_out_shared_min, &h_out_shared_min, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_out_shared_max, &h_out_shared_max, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_out_shared_sub, &h_out_shared_sub, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_out_shared_bitwise, h_out_shared_bitwise.data(), 3 * sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyHtoD(d_out_shared_exch, &h_out_shared_exch, sizeof(int32_t)));
+
+        int n_param = N;
+        void* args[] = {
+            &d_counter, &d_counter_f, &d_hist,
+            &d_tickets, &d_sub, &d_min, &d_max,
+            &d_and, &d_or, &d_xor,
+            &d_exch_i, &d_exch_f,
+            &d_out_old_exch_i, &d_out_old_exch_f,
+            &d_cas_winner, &d_cas_success,
+            &d_dev_counter,
+            &d_out_shared_sum, &d_out_shared_sum_f,
+            &d_out_shared_cas_winners, &d_out_shared_min, &d_out_shared_max,
+            &d_out_shared_sub, &d_out_shared_bitwise, &d_out_shared_exch,
+            &n_param
+        };
+
+        CHECK_CUDA(cuLaunchKernel(func, kNumBlocks, 1, 1, kBlockSize, 1, 1, 0, 0, args, 0));
+        CHECK_CUDA(cuCtxSynchronize());
+
+        CHECK_CUDA(cuMemcpyDtoH(&h_counter, d_counter, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyDtoH(&h_counter_f, d_counter_f, sizeof(float)));
+        CHECK_CUDA(cuMemcpyDtoH(h_hist.data(), d_hist, 16 * sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyDtoH(h_tickets.data(), d_tickets, N * sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyDtoH(&h_sub, d_sub, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyDtoH(&h_min, d_min, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyDtoH(&h_max, d_max, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyDtoH(&h_and, d_and, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyDtoH(&h_or, d_or, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyDtoH(&h_xor, d_xor, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyDtoH(&h_exch_i, d_exch_i, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyDtoH(&h_exch_f, d_exch_f, sizeof(float)));
+        CHECK_CUDA(cuMemcpyDtoH(&h_out_old_exch_i, d_out_old_exch_i, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyDtoH(&h_out_old_exch_f, d_out_old_exch_f, sizeof(float)));
+        CHECK_CUDA(cuMemcpyDtoH(&h_cas_winner, d_cas_winner, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyDtoH(&h_cas_success, d_cas_success, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyDtoH(&h_dev_counter, d_dev_counter, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyDtoH(h_out_shared_sum.data(), d_out_shared_sum, 16 * sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyDtoH(h_out_shared_sum_f.data(), d_out_shared_sum_f, 16 * sizeof(float)));
+        CHECK_CUDA(cuMemcpyDtoH(&h_out_shared_cas_winners, d_out_shared_cas_winners, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyDtoH(&h_out_shared_min, d_out_shared_min, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyDtoH(&h_out_shared_max, d_out_shared_max, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyDtoH(&h_out_shared_sub, d_out_shared_sub, sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyDtoH(h_out_shared_bitwise.data(), d_out_shared_bitwise, 3 * sizeof(int32_t)));
+        CHECK_CUDA(cuMemcpyDtoH(&h_out_shared_exch, d_out_shared_exch, sizeof(int32_t)));
+
+        // 1. Contention verification on atomic_add & ticket distribution (validating return value)
+        EXPECT_EQ(h_counter, N) << optName << " global int atomic_add sum";
+        EXPECT_FLOAT_EQ(h_counter_f, static_cast<float>(N)) << optName << " global float atomic_add sum";
+        for (int b = 0; b < 16; ++b) {
+            EXPECT_EQ(h_hist[b], N / 16) << optName << " global histogram bin " << b;
+        }
+        for (int i = 0; i < N; ++i) {
+            ASSERT_EQ(h_tickets[i], 1) << optName << " ticket " << i << " was not claimed exactly once";
+        }
+
+        // 2. Atomic sub verification
+        EXPECT_EQ(h_sub, 10000 - N * 2) << optName << " global atomic_sub";
+
+        // 3. Atomic min and max verification
+        EXPECT_EQ(h_min, 13) << optName << " global atomic_min";
+        EXPECT_EQ(h_max, (N - 1) * 7 + 13) << optName << " global atomic_max";
+
+        // 4. Bitwise atomics verification
+        EXPECT_EQ(h_or, static_cast<int32_t>(0xFFFFFFFF)) << optName << " global atomic_or";
+        EXPECT_EQ(h_and, 0) << optName << " global atomic_and";
+        EXPECT_EQ(h_xor, static_cast<int32_t>(0x55555555)) << optName << " global atomic_xor non-trivial flip";
+
+        // 5. Atomic exch verification (value and return value)
+        EXPECT_EQ(h_exch_i, 12345) << optName << " global atomic_exch int new value";
+        EXPECT_FLOAT_EQ(h_exch_f, 98.75f) << optName << " global atomic_exch float new value";
+        EXPECT_EQ(h_out_old_exch_i, -42) << optName << " global atomic_exch int return value (old value)";
+        EXPECT_FLOAT_EQ(h_out_old_exch_f, 3.14159f) << optName << " global atomic_exch float return value (old value)";
+
+        // 6. Atomic CAS single-winner verification
+        EXPECT_GT(h_cas_winner, 0) << optName << " CAS winner id";
+        EXPECT_LE(h_cas_winner, N) << optName << " CAS winner id upper bound";
+        EXPECT_EQ(h_cas_success, 1) << optName << " CAS success count (exactly 1 winner)";
+
+        // 7. Device function atomic verification
+        EXPECT_EQ(h_dev_counter, N) << optName << " device function atomic_add sum";
+
+        // 8. Shared memory atomics verification
+        for (int b = 0; b < 16; ++b) {
+            EXPECT_EQ(h_out_shared_sum[b], N / 16) << optName << " shared atomic_add bin " << b;
+            EXPECT_FLOAT_EQ(h_out_shared_sum_f[b], static_cast<float>(N / 16)) << optName << " shared float atomic_add bin " << b;
+        }
+        EXPECT_EQ(h_out_shared_cas_winners, kNumBlocks) << optName << " shared CAS winners (1 per block)";
+        EXPECT_EQ(h_out_shared_min, 1) << optName << " shared atomic_min";
+        EXPECT_EQ(h_out_shared_max, kBlockSize) << optName << " shared atomic_max";
+        EXPECT_EQ(h_out_shared_sub, 0) << optName << " shared atomic_sub (256-256=0 per block)";
+        EXPECT_EQ(h_out_shared_bitwise[0], -16) << optName << " shared atomic_or (16 * 0xFFFFFFFF)";
+        EXPECT_EQ(h_out_shared_bitwise[1], 0) << optName << " shared atomic_and";
+        EXPECT_EQ(h_out_shared_bitwise[2], static_cast<int32_t>(16u * 0x55555555u)) << optName << " shared atomic_xor";
+        EXPECT_EQ(h_out_shared_exch, 16 * (888 + 777)) << optName << " shared atomic_exch (new + old value)";
+
+        // Cleanup
+        CHECK_CUDA(cuMemFree(d_counter));
+        CHECK_CUDA(cuMemFree(d_counter_f));
+        CHECK_CUDA(cuMemFree(d_hist));
+        CHECK_CUDA(cuMemFree(d_tickets));
+        CHECK_CUDA(cuMemFree(d_sub));
+        CHECK_CUDA(cuMemFree(d_min));
+        CHECK_CUDA(cuMemFree(d_max));
+        CHECK_CUDA(cuMemFree(d_and));
+        CHECK_CUDA(cuMemFree(d_or));
+        CHECK_CUDA(cuMemFree(d_xor));
+        CHECK_CUDA(cuMemFree(d_exch_i));
+        CHECK_CUDA(cuMemFree(d_exch_f));
+        CHECK_CUDA(cuMemFree(d_out_old_exch_i));
+        CHECK_CUDA(cuMemFree(d_out_old_exch_f));
+        CHECK_CUDA(cuMemFree(d_cas_winner));
+        CHECK_CUDA(cuMemFree(d_cas_success));
+        CHECK_CUDA(cuMemFree(d_dev_counter));
+        CHECK_CUDA(cuMemFree(d_out_shared_sum));
+        CHECK_CUDA(cuMemFree(d_out_shared_sum_f));
+        CHECK_CUDA(cuMemFree(d_out_shared_cas_winners));
+        CHECK_CUDA(cuMemFree(d_out_shared_min));
+        CHECK_CUDA(cuMemFree(d_out_shared_max));
+        CHECK_CUDA(cuMemFree(d_out_shared_sub));
+        CHECK_CUDA(cuMemFree(d_out_shared_bitwise));
+        CHECK_CUDA(cuMemFree(d_out_shared_exch));
+
+        CHECK_CUDA(cuModuleUnload(mod));
+    }
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     ::testing::AddGlobalTestEnvironment(new CudaEnvironment);

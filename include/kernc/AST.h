@@ -205,6 +205,42 @@ inline std::optional<WarpIntrinsic> getWarpIntrinsic(std::string_view name) {
     return std::nullopt;
 }
 
+enum class AtomicIntrinsic {
+    Add,
+    Sub,
+    Min,
+    Max,
+    And,
+    Or,
+    Xor,
+    Exch,
+    Cas
+};
+
+inline std::optional<AtomicIntrinsic> getAtomicIntrinsic(std::string_view name) {
+    if (name == "atomic_add" || name == "__atomic_add" || name == "atomicAdd" || name == "__atomicAdd")
+        return AtomicIntrinsic::Add;
+    if (name == "atomic_sub" || name == "__atomic_sub" || name == "atomicSub" || name == "__atomicSub")
+        return AtomicIntrinsic::Sub;
+    if (name == "atomic_min" || name == "__atomic_min" || name == "atomicMin" || name == "__atomicMin")
+        return AtomicIntrinsic::Min;
+    if (name == "atomic_max" || name == "__atomic_max" || name == "atomicMax" || name == "__atomicMax")
+        return AtomicIntrinsic::Max;
+    if (name == "atomic_and" || name == "__atomic_and" || name == "atomicAnd" || name == "__atomicAnd")
+        return AtomicIntrinsic::And;
+    if (name == "atomic_or" || name == "__atomic_or" || name == "atomicOr" || name == "__atomicOr")
+        return AtomicIntrinsic::Or;
+    if (name == "atomic_xor" || name == "__atomic_xor" || name == "atomicXor" || name == "__atomicXor")
+        return AtomicIntrinsic::Xor;
+    if (name == "atomic_exch" || name == "__atomic_exch" || name == "atomicExch" || name == "__atomicExch" ||
+        name == "atomic_exchange" || name == "__atomic_exchange" || name == "atomicExchange" || name == "__atomicExchange")
+        return AtomicIntrinsic::Exch;
+    if (name == "atomic_cas" || name == "__atomic_cas" || name == "atomicCAS" || name == "__atomicCAS" ||
+        name == "atomicCas" || name == "__atomicCas")
+        return AtomicIntrinsic::Cas;
+    return std::nullopt;
+}
+
 // `f(a, b)`: a call to a device function (`func`) or warp intrinsic, lowered to PTX.
 struct CallExpr : public Expr {
     std::string callee;

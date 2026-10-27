@@ -73,6 +73,15 @@ const char* irOpToString(IROp op) {
         case IROp::ShflBfly:   return "shfl.sync.bfly";
         case IROp::VoteBallot: return "vote.sync.ballot";
         case IROp::Activemask: return "activemask";
+        case IROp::AtomicAdd:  return "atom.add";
+        case IROp::AtomicSub:  return "atom.sub";
+        case IROp::AtomicMin:  return "atom.min";
+        case IROp::AtomicMax:  return "atom.max";
+        case IROp::AtomicAnd:  return "atom.and";
+        case IROp::AtomicOr:   return "atom.or";
+        case IROp::AtomicXor:  return "atom.xor";
+        case IROp::AtomicExch: return "atom.exch";
+        case IROp::AtomicCas:  return "atom.cas";
     }
     return "??";
 }
@@ -127,6 +136,19 @@ std::string IRInst::toString() const {
             ss << "%v" << src1 << ", %v" << src2;
             break;
         case IROp::Activemask:
+            break;
+        case IROp::AtomicAdd:
+        case IROp::AtomicSub:
+        case IROp::AtomicMin:
+        case IROp::AtomicMax:
+        case IROp::AtomicAnd:
+        case IROp::AtomicOr:
+        case IROp::AtomicXor:
+        case IROp::AtomicExch:
+            ss << (space == AddrSpace::Shared ? "shared" : "global") << " [%v" << src1 << "], %v" << src2;
+            break;
+        case IROp::AtomicCas:
+            ss << (space == AddrSpace::Shared ? "shared" : "global") << " [%v" << src1 << "], %v" << src2 << ", %v" << src3;
             break;
         case IROp::Neg:
         case IROp::FNeg:

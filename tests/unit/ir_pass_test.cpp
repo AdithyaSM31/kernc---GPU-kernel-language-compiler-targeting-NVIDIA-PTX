@@ -620,5 +620,109 @@ TEST(IRPassTest, BallotSyncWithIntPredicateEmitsSetpNe) {
     EXPECT_NE(ptx.find("vote.sync.ballot.b32"), std::string::npos) << ptx;
 }
 
+TEST(IRPassTest, AtomicOperationsIROpsAndPTX) {
+    std::string src =
+        "kernel test_atomics(int* g_i, float* g_f) {\n"
+        "    shared int s_i[32];\n"
+        "    shared float s_f[32];\n"
+        "    atomic_add(g_i, 1);\n"
+        "    atomic_add(g_f, 1.5);\n"
+        "    atomic_add(s_i, 2);\n"
+        "    atomic_add(s_f, 2.5);\n"
+        "    atomic_sub(g_i, 3);\n"
+        "    atomic_sub(s_i, 4);\n"
+        "    atomic_min(g_i, 5);\n"
+        "    atomic_max(g_i, 6);\n"
+        "    atomic_and(g_i, 7);\n"
+        "    atomic_or(g_i, 8);\n"
+        "    atomic_xor(g_i, 9);\n"
+        "    atomic_exch(g_i, 10);\n"
+        "    atomic_exch(g_f, 11.0);\n"
+        "    atomic_cas(g_i, 0, 12);\n"
+        "    atomic_cas(s_i, 0, 13);\n"
+        "}\n";
+    auto fn = compileToIR(src);
+    EXPECT_EQ(countOps(fn, IROp::AtomicAdd), 4);
+    EXPECT_EQ(countOps(fn, IROp::AtomicSub), 2);
+    EXPECT_EQ(countOps(fn, IROp::AtomicMin), 1);
+    EXPECT_EQ(countOps(fn, IROp::AtomicMax), 1);
+    EXPECT_EQ(countOps(fn, IROp::AtomicAnd), 1);
+    EXPECT_EQ(countOps(fn, IROp::AtomicOr), 1);
+    EXPECT_EQ(countOps(fn, IROp::AtomicXor), 1);
+    EXPECT_EQ(countOps(fn, IROp::AtomicExch), 2);
+    EXPECT_EQ(countOps(fn, IROp::AtomicCas), 2);
+
+    PTXEmitter emitter;
+    std::string ptx = emitter.emitFunction(fn);
+
+    EXPECT_NE(ptx.find("atom.global.add.s32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("atom.global.add.f32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("atom.shared.add.s32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("atom.shared.add.f32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("neg.s32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("atom.global.min.s32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("atom.global.max.s32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("atom.global.and.b32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("atom.global.or.b32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("atom.global.xor.b32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("atom.global.exch.b32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("atom.global.cas.b32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("atom.shared.cas.b32"), std::string::npos) << ptx;
+}
+
+TEST(IRPassTest, AtomicOperationsNotPrunedByDCE) {
+    std::string src =
+        "kernel test_atom_dce(int* p) {\n"
+        "    atomic_add(p, 1);\n"
+        "    atomic_sub(p, 2);\n"
+        "    atomic_min(p, 3);\n"
+        "    atomic_max(p, 4);\n"
+        "    atomic_and(p, 5);\n"
+        "    atomic_or(p, 6);\n"
+        "    atomic_xor(p, 7);\n"
+        "    atomic_exch(p, 8);\n"
+        "    atomic_cas(p, 0, 9);\n"
+        "}\n";
+    auto fn = compileToIR(src);
+    EXPECT_EQ(countOps(fn, IROp::AtomicAdd), 1);
+    EXPECT_EQ(countOps(fn, IROp::AtomicSub), 1);
+    EXPECT_EQ(countOps(fn, IROp::AtomicMin), 1);
+    EXPECT_EQ(countOps(fn, IROp::AtomicMax), 1);
+    EXPECT_EQ(countOps(fn, IROp::AtomicAnd), 1);
+    EXPECT_EQ(countOps(fn, IROp::AtomicOr), 1);
+    EXPECT_EQ(countOps(fn, IROp::AtomicXor), 1);
+    EXPECT_EQ(countOps(fn, IROp::AtomicExch), 1);
+    EXPECT_EQ(countOps(fn, IROp::AtomicCas), 1);
+
+    Optimizer::runPasses(fn);
+
+    EXPECT_EQ(countOps(fn, IROp::AtomicAdd), 1) << "atomic_add must not be pruned by DCE!";
+    EXPECT_EQ(countOps(fn, IROp::AtomicSub), 1) << "atomic_sub must not be pruned by DCE!";
+    EXPECT_EQ(countOps(fn, IROp::AtomicMin), 1) << "atomic_min must not be pruned by DCE!";
+    EXPECT_EQ(countOps(fn, IROp::AtomicMax), 1) << "atomic_max must not be pruned by DCE!";
+    EXPECT_EQ(countOps(fn, IROp::AtomicAnd), 1) << "atomic_and must not be pruned by DCE!";
+    EXPECT_EQ(countOps(fn, IROp::AtomicOr), 1) << "atomic_or must not be pruned by DCE!";
+    EXPECT_EQ(countOps(fn, IROp::AtomicXor), 1) << "atomic_xor must not be pruned by DCE!";
+    EXPECT_EQ(countOps(fn, IROp::AtomicExch), 1) << "atomic_exch must not be pruned by DCE!";
+    EXPECT_EQ(countOps(fn, IROp::AtomicCas), 1) << "atomic_cas must not be pruned by DCE!";
+}
+
+TEST(IRPassTest, DeviceFunctionCallingAtomicOperations) {
+    std::string src =
+        "func int dev_add(int* p, int v) {\n"
+        "    return atomic_add(p, v);\n"
+        "}\n"
+        "kernel k(int* g) {\n"
+        "    dev_add(g, 5);\n"
+        "}\n";
+    auto mod = compileModule(src);
+    ASSERT_EQ(mod.functions.size(), 2);
+    PTXEmitter emitter;
+    std::string ptx = emitter.emitModule(mod);
+    EXPECT_NE(ptx.find("atom.global.add.s32"), std::string::npos) << ptx;
+    EXPECT_NE(ptx.find("call ($ret), dev_add"), std::string::npos) << ptx;
+}
+
+
 
 

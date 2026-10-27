@@ -468,7 +468,12 @@ bool Optimizer::runDeadCodeElimination(IRFunction& fn) {
                     it->op == IROp::StoreRetval ||
                     it->op == IROp::ShflIdx || it->op == IROp::ShflDown ||
                     it->op == IROp::ShflUp || it->op == IROp::ShflBfly ||
-                    it->op == IROp::VoteBallot) {
+                    it->op == IROp::VoteBallot ||
+                    it->op == IROp::AtomicAdd || it->op == IROp::AtomicSub ||
+                    it->op == IROp::AtomicMin || it->op == IROp::AtomicMax ||
+                    it->op == IROp::AtomicAnd || it->op == IROp::AtomicOr ||
+                    it->op == IROp::AtomicXor || it->op == IROp::AtomicExch ||
+                    it->op == IROp::AtomicCas) {
                     ++it;
                     continue;
                 }

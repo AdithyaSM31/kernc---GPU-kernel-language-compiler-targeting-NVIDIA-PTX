@@ -102,3 +102,31 @@ Type rules in `Sema`:
 - Pointer types and `bool` values as shuffle payloads are rejected with compile-time diagnostics.
 - Intrinsic names are reserved identifiers and cannot be redefined as functions or shadowed by variables.
 
+### Atomic Memory Operations
+`kernc` provides hardware-accelerated atomic memory transactions operating on global memory pointers (`int*`, `float*`) and shared memory arrays (`shared int`, `shared float`). Atomics guarantee serialized, race-free read-modify-write execution across concurrent threads and thread blocks.
+
+Supported operations (available in both `snake_case` and CUDA `camelCase`, with and without `__` prefix):
+- `atomic_add(ptr, val)` / `__atomic_add`, `atomicAdd`, `__atomicAdd`: atomic addition (`atom.add.s32`, `atom.add.f32`).
+- `atomic_sub(ptr, val)` / `__atomic_sub`, `atomicSub`, `__atomicSub`: atomic subtraction (`neg.s32` + `atom.add.s32`).
+- `atomic_min(ptr, val)` / `__atomic_min`, `atomicMin`, `__atomicMin`: atomic signed minimum (`atom.min.s32`).
+- `atomic_max(ptr, val)` / `__atomic_max`, `atomicMax`, `__atomicMax`: atomic signed maximum (`atom.max.s32`).
+- `atomic_and(ptr, val)` / `__atomic_and`, `atomicAnd`, `__atomicAnd`: atomic bitwise AND (`atom.and.b32`).
+- `atomic_or(ptr, val)` / `__atomic_or`, `atomicOr`, `__atomicOr`: atomic bitwise OR (`atom.or.b32`).
+- `atomic_xor(ptr, val)` / `__atomic_xor`, `atomicXor`, `__atomicXor`: atomic bitwise XOR (`atom.xor.b32`).
+- `atomic_exch(ptr, val)` / `__atomic_exch`, `atomicExch`, `__atomicExch`, `atomic_exchange`, `atomicExchange`: atomic swap / exchange (`atom.exch.b32`).
+- `atomic_cas(ptr, cmp, val)` / `__atomic_cas`, `atomicCAS`, `__atomicCAS`, `atomicCas`: atomic compare-and-swap (`atom.cas.b32`).
+
+Syntax forms:
+- Direct address: `atomic_add(ptr, val)` or `atomic_cas(ptr, cmp, val)`.
+- Explicit index offset: `atomic_add(ptr, index, val)` or `atomic_cas(ptr, index, cmp, val)`.
+- Array subscript notation: `atomic_add(ptr[index], val)` or `atomic_cas(ptr[index], cmp, val)`.
+
+Type rules in `Sema`:
+- First operand (`ptr`) must be a pointer (`int*`, `float*`) or a shared array (`shared int`, `shared float`).
+- `add` and `exch` accept both `int` and `float` memory targets (return type matches pointee type).
+- `sub`, `min`, `max`, `and`, `or`, `xor`, and `cas` accept only `int` memory targets (float targets produce compile-time diagnostics).
+- `index`, `cmp`, and bitwise `val` operands must be `int`.
+- Returns the old (prior) value at the specified memory location; can be consumed as an expression or used as an expression statement.
+- Intrinsic names are reserved identifiers and cannot be shadowed or redefined.
+
+

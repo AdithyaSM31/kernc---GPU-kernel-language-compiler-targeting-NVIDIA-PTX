@@ -451,3 +451,135 @@ TEST(SemaTest, WarpIntrinsicsRedefinitionOrShadowingRejected) {
     EXPECT_NE(diag4.formatAll().find("cannot redefine intrinsic '__shfl_sync' as a kernel"), std::string::npos);
 }
 
+TEST(SemaTest, AtomicOperationsValidSignatures) {
+    std::string src =
+        "kernel test_atomics(int* p_i, float* p_f) {\n"
+        "    shared int s_i[64];\n"
+        "    shared float s_f[64];\n"
+        "    // Statement form (discard return)\n"
+        "    atomic_add(p_i, 1);\n"
+        "    __atomic_add(p_i, 1);\n"
+        "    atomicAdd(p_i, 1);\n"
+        "    __atomicAdd(p_i, 1);\n"
+        "    atomic_sub(p_i, 1);\n"
+        "    atomicSub(p_i, 1);\n"
+        "    atomic_min(p_i, 1);\n"
+        "    atomicMin(p_i, 1);\n"
+        "    atomic_max(p_i, 1);\n"
+        "    atomicMax(p_i, 1);\n"
+        "    atomic_and(p_i, 1);\n"
+        "    atomicAnd(p_i, 1);\n"
+        "    atomic_or(p_i, 1);\n"
+        "    atomicOr(p_i, 1);\n"
+        "    atomic_xor(p_i, 1);\n"
+        "    atomicXor(p_i, 1);\n"
+        "    // Expression form (capturing return value)\n"
+        "    int old_add = atomic_add(p_i, 2, 5);\n"
+        "    int old_sub = atomicSub(p_i, 2, 5);\n"
+        "    int old_subscript = atomic_add(p_i[3], 7);\n"
+        "    int old_shared = atomic_add(s_i, 10);\n"
+        "    int old_shared_idx = atomic_add(s_i, 4, 10);\n"
+        "    int old_shared_subscript = atomic_add(s_i[4], 10);\n"
+        "    // Float atomics (add and exch)\n"
+        "    float old_f_add = atomic_add(p_f, 1.5);\n"
+        "    float old_f_add_idx = atomic_add(p_f, 2, 2.5);\n"
+        "    float old_f_subscript = atomic_add(p_f[3], 3.5);\n"
+        "    float old_sf_add = atomic_add(s_f, 4.5);\n"
+        "    float old_sf_add_idx = atomic_add(s_f, 1, 5.5);\n"
+        "    float old_sf_subscript = atomic_add(s_f[1], 6.5);\n"
+        "    int old_exch_i = atomic_exch(p_i, 42);\n"
+        "    int old_exchange_i = atomic_exchange(p_i, 43);\n"
+        "    int old_Exchange_i = atomicExchange(p_i, 44);\n"
+        "    float old_exch_f = atomicExch(p_f[0], 3.14);\n"
+        "    float old_sf_exch = atomic_exch(s_f, 2.71);\n"
+        "    // CAS\n"
+        "    int old_cas1 = atomic_cas(p_i, 0, 1);\n"
+        "    int old_cas2 = atomicCAS(p_i, 2, 0, 1);\n"
+        "    int old_cas3 = atomic_cas(p_i[3], 0, 1);\n"
+        "    int old_cas4 = atomicCAS(s_i, 0, 1);\n"
+        "    int old_cas5 = atomic_cas(s_i, 4, 0, 1);\n"
+        "    int old_cas6 = atomicCAS(s_i[4], 0, 1);\n"
+        "}\n"
+        "func int dev_helper(int* ptr, int v) {\n"
+        "    return atomic_add(ptr, v);\n"
+        "}\n";
+    DiagnosticsEngine diag;
+    bool ok = checkSource(src, diag);
+    EXPECT_TRUE(ok) << diag.formatAll();
+    EXPECT_FALSE(diag.hasErrors());
+}
+
+TEST(SemaTest, AtomicOperationsInvalidTypesRejected) {
+    struct TestCase {
+        std::string src;
+        std::string expectedErr;
+    };
+    std::vector<TestCase> cases = {
+        {"kernel k(int x) { atomic_add(x, 1); }", "argument 1 ('ptr') of 'atomic_add' must be a pointer or shared array, got 'int'"},
+        {"kernel k(int* p) { atomic_sub(p, 1.5); }", "argument 2 ('val') of 'atomic_sub' must be 'int', got 'float'"},
+        {"kernel k(float* p) { atomic_sub(p, 1); }", "intrinsic 'atomic_sub' does not support 'float' memory operand"},
+        {"kernel k(float* p) { atomic_min(p, 1); }", "intrinsic 'atomic_min' does not support 'float' memory operand"},
+        {"kernel k(float* p) { atomic_max(p, 1); }", "intrinsic 'atomic_max' does not support 'float' memory operand"},
+        {"kernel k(float* p) { atomic_and(p, 1); }", "intrinsic 'atomic_and' does not support 'float' memory operand"},
+        {"kernel k(float* p) { atomic_or(p, 1); }", "intrinsic 'atomic_or' does not support 'float' memory operand"},
+        {"kernel k(float* p) { atomic_xor(p, 1); }", "intrinsic 'atomic_xor' does not support 'float' memory operand"},
+        {"kernel k(float* p) { atomic_cas(p, 0, 1); }", "intrinsic 'atomic_cas' does not support 'float' memory operand"},
+        {"kernel k(int* p) { atomic_add(p, 1.5, 2); }", "argument 2 ('index') of 'atomic_add' must be 'int', got 'float'"},
+        {"kernel k(int* p) { atomic_add(p, true); }", "argument 2 ('val') of 'atomic_add' must be 'int', got 'bool'"},
+        {"kernel k(int* p) { atomic_cas(p, 0, 1.5); }", "argument 3 ('val') of 'atomic_cas' must be 'int', got 'float'"},
+        {"kernel k(int* p) { atomic_cas(p, 1.5, 0); }", "argument 2 ('cmp') of 'atomic_cas' must be 'int', got 'float'"},
+    };
+
+    for (const auto& tc : cases) {
+        DiagnosticsEngine diag;
+        EXPECT_FALSE(checkSource(tc.src, diag)) << tc.src;
+        EXPECT_NE(diag.formatAll().find(tc.expectedErr), std::string::npos)
+            << "Expected: " << tc.expectedErr << "\nGot: " << diag.formatAll();
+    }
+}
+
+TEST(SemaTest, AtomicOperationsArityMismatchesRejected) {
+    struct TestCase {
+        std::string src;
+        std::string expectedErr;
+    };
+    std::vector<TestCase> cases = {
+        {"kernel k(int* p) { atomic_add(p); }", "intrinsic 'atomic_add' expects 2 or 3 argument(s), got 1"},
+        {"kernel k(int* p) { atomic_add(p, 1, 2, 3); }", "intrinsic 'atomic_add' expects 2 or 3 argument(s), got 4"},
+        {"kernel k(int* p) { atomic_add(p[0], 1, 2); }", "intrinsic 'atomic_add' with subscripted pointer expects 2 argument(s), got 3"},
+        {"kernel k(int* p) { atomic_cas(p, 1); }", "intrinsic 'atomic_cas' expects 3 or 4 argument(s), got 2"},
+        {"kernel k(int* p) { atomic_cas(p, 1, 2, 3, 4); }", "intrinsic 'atomic_cas' expects 3 or 4 argument(s), got 5"},
+        {"kernel k(int* p) { atomic_cas(p[0], 1, 2, 3); }", "intrinsic 'atomic_cas' with subscripted pointer expects 3 argument(s), got 4"},
+    };
+
+    for (const auto& tc : cases) {
+        DiagnosticsEngine diag;
+        EXPECT_FALSE(checkSource(tc.src, diag)) << tc.src;
+        EXPECT_NE(diag.formatAll().find(tc.expectedErr), std::string::npos)
+            << "Expected: " << tc.expectedErr << "\nGot: " << diag.formatAll();
+    }
+}
+
+TEST(SemaTest, AtomicOperationsRedefinitionOrShadowingRejected) {
+    std::string src1 = "func int atomic_add(int a, int b) { return a + b; }\nkernel k() {}\n";
+    DiagnosticsEngine diag1;
+    EXPECT_FALSE(checkSource(src1, diag1));
+    EXPECT_NE(diag1.formatAll().find("cannot redefine intrinsic 'atomic_add' as a function"), std::string::npos);
+
+    std::string src2 = "kernel atomicAdd(int* p) {}\n";
+    DiagnosticsEngine diag2;
+    EXPECT_FALSE(checkSource(src2, diag2));
+    EXPECT_NE(diag2.formatAll().find("cannot redefine intrinsic 'atomicAdd' as a kernel"), std::string::npos);
+
+    std::string src3 = "kernel k(int atomic_cas) {}\n";
+    DiagnosticsEngine diag3;
+    EXPECT_FALSE(checkSource(src3, diag3));
+    EXPECT_NE(diag3.formatAll().find("reserved builtin name"), std::string::npos);
+
+    std::string src4 = "kernel k() { int atomicCAS = 1; }\n";
+    DiagnosticsEngine diag4;
+    EXPECT_FALSE(checkSource(src4, diag4));
+    EXPECT_NE(diag4.formatAll().find("reserved builtin name"), std::string::npos);
+}
+
+

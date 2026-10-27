@@ -89,7 +89,18 @@ enum class IROp {
     ShflUp,
     ShflBfly,
     VoteBallot,
-    Activemask
+    Activemask,
+
+    // Atomic Memory Operations
+    AtomicAdd,
+    AtomicSub,
+    AtomicMin,
+    AtomicMax,
+    AtomicAnd,
+    AtomicOr,
+    AtomicXor,
+    AtomicExch,
+    AtomicCas
 };
 
 const char* irOpToString(IROp op);

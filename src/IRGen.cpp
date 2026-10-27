@@ -231,15 +231,13 @@ void IRGen::emitSharedDecl(const SharedDeclStmt& stmt, IRFunction& fn) {
 }
 
 VReg IRGen::emitElementAddress(const IndexExpr& idx, IRFunction& fn, AddrSpace& space, IRType& elemType) {
-    auto* baseIdent = dynamic_cast<const IdentExpr*>(idx.base.get());
+    return emitMemoryAddress(*idx.base, idx.index.get(), fn, space, elemType);
+}
+
+VReg IRGen::emitMemoryAddress(const Expr& baseExpr, const Expr* indexExpr, IRFunction& fn, AddrSpace& space, IRType& elemType) {
+    auto* baseIdent = dynamic_cast<const IdentExpr*>(&baseExpr);
     const VarInfo* baseInfo = getVar(baseIdent->name);
     elemType = baseInfo->type.pointeeKind == Type::Float ? IRType::F32 : IRType::S32;
-
-    VReg idxReg = emitExpr(*idx.index, fn);
-    VReg szReg = fn.freshReg(IRType::S32);
-    IRInst ldimm{IROp::LoadImm, szReg, 0, 0, IRType::S32};
-    ldimm.immInt = 4;
-    fn.emit(ldimm);
 
     if (baseInfo->type.isSharedArray()) {
         // 32-bit arithmetic: shared addresses are offsets into the block's shared window.
@@ -248,20 +246,39 @@ VReg IRGen::emitElementAddress(const IndexExpr& idx, IRFunction& fn, AddrSpace& 
         IRInst addrOf{IROp::SharedAddr, baseReg, 0, 0, IRType::S32};
         addrOf.symbol = baseInfo->sharedSymbol;
         fn.emit(addrOf);
-        VReg offReg = fn.freshReg(IRType::S32);
-        fn.emit(IRInst{IROp::Mul, offReg, idxReg, szReg, IRType::S32});
-        VReg addrReg = fn.freshReg(IRType::S32);
-        fn.emit(IRInst{IROp::Add, addrReg, baseReg, offReg, IRType::S32});
-        return addrReg;
+
+        if (indexExpr) {
+            VReg idxReg = emitExpr(*indexExpr, fn);
+            VReg szReg = fn.freshReg(IRType::S32);
+            IRInst ldimm{IROp::LoadImm, szReg, 0, 0, IRType::S32};
+            ldimm.immInt = 4;
+            fn.emit(ldimm);
+
+            VReg offReg = fn.freshReg(IRType::S32);
+            fn.emit(IRInst{IROp::Mul, offReg, idxReg, szReg, IRType::S32});
+            VReg addrReg = fn.freshReg(IRType::S32);
+            fn.emit(IRInst{IROp::Add, addrReg, baseReg, offReg, IRType::S32});
+            return addrReg;
+        }
+        return baseReg;
     }
 
     // Global pointer: widen the 32-bit index while scaling it, then add the 64-bit base.
     space = AddrSpace::Global;
-    VReg offReg = fn.freshReg(IRType::S64);
-    fn.emit(IRInst{IROp::MulWide, offReg, idxReg, szReg, IRType::S64});
-    VReg addrReg = fn.freshReg(IRType::S64);
-    fn.emit(IRInst{IROp::AddS64, addrReg, baseInfo->reg, offReg, IRType::S64});
-    return addrReg;
+    if (indexExpr) {
+        VReg idxReg = emitExpr(*indexExpr, fn);
+        VReg szReg = fn.freshReg(IRType::S32);
+        IRInst ldimm{IROp::LoadImm, szReg, 0, 0, IRType::S32};
+        ldimm.immInt = 4;
+        fn.emit(ldimm);
+
+        VReg offReg = fn.freshReg(IRType::S64);
+        fn.emit(IRInst{IROp::MulWide, offReg, idxReg, szReg, IRType::S64});
+        VReg addrReg = fn.freshReg(IRType::S64);
+        fn.emit(IRInst{IROp::AddS64, addrReg, baseInfo->reg, offReg, IRType::S64});
+        return addrReg;
+    }
+    return baseInfo->reg;
 }
 
 void IRGen::emitIf(const IfStmt& stmt, IRFunction& fn) {
@@ -735,6 +752,85 @@ VReg IRGen::emitCallExpr(const CallExpr& expr, IRFunction& fn) {
                 return dst;
             }
         }
+    }
+
+    if (auto atomic = getAtomicIntrinsic(expr.callee)) {
+        bool isCas = (*atomic == AtomicIntrinsic::Cas);
+        const Expr* baseExpr = nullptr;
+        const Expr* indexExpr = nullptr;
+        const Expr* cmpExpr = nullptr;
+        const Expr* valExpr = nullptr;
+
+        if (auto* idx = dynamic_cast<const IndexExpr*>(expr.args[0].get())) {
+            baseExpr = idx->base.get();
+            indexExpr = idx->index.get();
+            if (isCas) {
+                cmpExpr = expr.args[1].get();
+                valExpr = expr.args[2].get();
+            } else {
+                valExpr = expr.args[1].get();
+            }
+        } else {
+            baseExpr = expr.args[0].get();
+            size_t maxArgs = isCas ? 4 : 3;
+            if (expr.args.size() == maxArgs) {
+                indexExpr = expr.args[1].get();
+                if (isCas) {
+                    cmpExpr = expr.args[2].get();
+                    valExpr = expr.args[3].get();
+                } else {
+                    valExpr = expr.args[2].get();
+                }
+            } else {
+                indexExpr = nullptr;
+                if (isCas) {
+                    cmpExpr = expr.args[1].get();
+                    valExpr = expr.args[2].get();
+                } else {
+                    valExpr = expr.args[1].get();
+                }
+            }
+        }
+
+        AddrSpace space;
+        IRType elemType;
+        VReg addrReg = emitMemoryAddress(*baseExpr, indexExpr, fn, space, elemType);
+
+        if (isCas) {
+            VReg cmpReg = emitExpr(*cmpExpr, fn);
+            VReg valReg = emitExpr(*valExpr, fn);
+            VReg dstReg = fn.freshReg(IRType::S32);
+            IRInst inst{IROp::AtomicCas, dstReg, addrReg, cmpReg, valReg, IRType::S32};
+            inst.space = space;
+            fn.emit(inst);
+            return dstReg;
+        }
+
+        VReg valReg = emitExpr(*valExpr, fn);
+        if (elemType == IRType::F32 && valExpr->resolvedType.isInt()) {
+            VReg cvtReg = fn.freshReg(IRType::F32);
+            fn.emit(IRInst{IROp::CvtI2F, cvtReg, valReg, 0, IRType::F32});
+            valReg = cvtReg;
+        }
+
+        IROp op;
+        switch (*atomic) {
+            case AtomicIntrinsic::Add:  op = IROp::AtomicAdd; break;
+            case AtomicIntrinsic::Sub:  op = IROp::AtomicSub; break;
+            case AtomicIntrinsic::Min:  op = IROp::AtomicMin; break;
+            case AtomicIntrinsic::Max:  op = IROp::AtomicMax; break;
+            case AtomicIntrinsic::And:  op = IROp::AtomicAnd; break;
+            case AtomicIntrinsic::Or:   op = IROp::AtomicOr; break;
+            case AtomicIntrinsic::Xor:  op = IROp::AtomicXor; break;
+            case AtomicIntrinsic::Exch: op = IROp::AtomicExch; break;
+            default:                    op = IROp::AtomicAdd; break;
+        }
+
+        VReg dstReg = fn.freshReg(elemType);
+        IRInst inst{op, dstReg, addrReg, valReg, elemType};
+        inst.space = space;
+        fn.emit(inst);
+        return dstReg;
     }
 
     auto it = funcSignatures_.find(expr.callee);
