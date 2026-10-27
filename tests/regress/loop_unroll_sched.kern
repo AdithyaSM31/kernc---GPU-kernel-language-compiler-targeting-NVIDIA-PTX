@@ -1,0 +1,35 @@
+// Regression test for Loop Unrolling and Instruction Scheduling
+// Verified under ptxas -arch=sm_86 at -O0 and -O1
+
+kernel test_regress_loop_unroll(int* out, int* in, int n) {
+    int tid = thread_idx;
+    if (tid < n) {
+        // Constant trip-count loop (T = 4): fully unrolled, 0 branch overhead
+        int sum = 0;
+        for (int i = 0; i < 4; i = i + 1) {
+            sum = sum + in[tid * 4 + i];
+        }
+        out[tid] = sum;
+    }
+}
+
+kernel test_regress_sched_pipeline(float* out, float* in_a, float* in_b, int n) {
+    int tid = thread_idx;
+    if (tid < n) {
+        // Memory loads from in_a and in_b are hoisted early by the list scheduler
+        // to hide 200-cycle global memory latency
+        float a0 = in_a[tid * 4 + 0];
+        float b0 = in_b[tid * 4 + 0];
+        float a1 = in_a[tid * 4 + 1];
+        float b1 = in_b[tid * 4 + 1];
+        float a2 = in_a[tid * 4 + 2];
+        float b2 = in_b[tid * 4 + 2];
+        float a3 = in_a[tid * 4 + 3];
+        float b3 = in_b[tid * 4 + 3];
+
+        out[tid * 4 + 0] = a0 * b0 + 1.0;
+        out[tid * 4 + 1] = a1 * b1 + 2.0;
+        out[tid * 4 + 2] = a2 * b2 + 3.0;
+        out[tid * 4 + 3] = a3 * b3 + 4.0;
+    }
+}

@@ -203,4 +203,23 @@ The IR is a non-SSA 3-address virtual-register code organized into Basic Blocks 
       - `StoreV2` and `StoreV4` are classified as side-effecting memory operations and are never removed by DCE.
       - `LoadV2` and `LoadV4` track use counts across all destination registers in `inst.dsts`. A vector load is pruned by DCE if and only if every destination register is unused (`useCount == 0`). If at least one component is live, the vector load is preserved.
 
+15. **Loop Unrolling and Basic Block Instruction Scheduling**:
+    - **Constant Trip-Count Detection & Loop Unrolling**:
+      - `IRGen::emitFor` detects canonical loops with constant bounds and step (`for (int i = C_start; i < C_end; i = i + C_step)`).
+      - Computes constant trip count $T = \lfloor (C_{end} - C_{start} + C_{step} - 1) / C_{step} \rfloor$.
+      - When $0 < T \le 16$, `IRGen` completely unrolls the loop $T$ times inside the current basic block by binding the induction variable to constant values ($C_{start} + k \cdot C_{step}$) loaded via `LoadImm`.
+      - Completely eliminates loop branch overhead (`bra`, `bra.cond`, `setp`) and extra basic blocks (`L_for_cond`, `L_for_body`, `L_for_end`).
+      - Downstream constant folding immediately propagates the induction constant into array indexing (`base + (C_start + k*C_step)*4`), folding `MulWide` and `AddS64` into immediate offsets and `Mov`.
+    - **Local Dependency DAG Construction**:
+      - Instructions within basic blocks are scheduled between fences/barriers (`barrier()`, atomics, shuffles, calls, and terminators).
+      - Tracks register RAW (dataflow), WAR (anti-dependency), and WAW (output dependency).
+      - Memory aliasing: Tracks pointer base registers back to parameter roots and shared memory symbols. Disjoint pointer bases allow hoisting loads above stores, while identical or unknown bases enforce conservative RAW/WAR memory hazard edges.
+      - Sequential store order is strictly preserved (Store -> Store edges).
+    - **Latency-Aware List Scheduling**:
+      - Base instruction latencies on sm_86: Global Loads = 100, Shared Loads = 80, Parameter/SReg/Immediate reads = 50, Address computations = 40, ALU/conversions = 20, Stores = 1.
+      - Calculates critical path depth via DAG height.
+      - Hoists memory loads early to hide memory latency (200-400 cycles on Ampere), interleaves ALU operations to saturate compute pipelines, and sinks stores to the end of the block.
+      - Verified on SASS disassembly via `nvdisasm`: eliminates scoreboard stalls by scheduling all `LDG.E` / `LDG.E.128` instructions concurrently before dependent ALU and stores.
+
+
 

@@ -11,6 +11,7 @@ public:
 
     static bool runConstantFolding(IRFunction& fn);
     static bool runDeadCodeElimination(IRFunction& fn);
+    static bool runInstructionScheduling(IRFunction& fn);
 };
 
 } // namespace kernc

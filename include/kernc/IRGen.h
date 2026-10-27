@@ -12,6 +12,9 @@ class IRGen {
 public:
     explicit IRGen(DiagnosticsEngine& diag);
 
+    void setUnrollLoops(bool enable) { unrollLoops_ = enable; }
+    bool unrollLoops() const { return unrollLoops_; }
+
     IRModule emitModule(const Program& program);
     IRFunction emitFunction(const FunctionDecl& kernel);
 
@@ -24,6 +27,10 @@ private:
     void emitWhile(const WhileStmt& stmt, IRFunction& fn);
     void emitFor(const ForStmt& stmt, IRFunction& fn);
     void emitBlock(const BlockStmt& stmt, IRFunction& fn);
+
+    bool tryGetConstantTripCount(const ForStmt& stmt, int64_t& tripCount, int64_t& start, int64_t& step, std::string& varName);
+    static bool extractIntConstant(const Expr* expr, int64_t& outVal);
+    static bool hasAssignmentTo(const Stmt& stmt, const std::string& varName);
 
     VReg emitExpr(const Expr& expr, IRFunction& fn);
     VReg emitBinaryExpr(const BinaryExpr& expr, IRFunction& fn);
@@ -90,6 +97,7 @@ private:
 
     DiagnosticsEngine& diag_;
     std::vector<std::unordered_map<std::string, VarInfo>> varScopes_;
+    bool unrollLoops_ = true;
 };
 
 } // namespace kernc

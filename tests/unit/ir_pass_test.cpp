@@ -790,6 +790,155 @@ TEST(IRPassTest, VectorLoadsPrunedByDCEWhenCompletelyUnused) {
     EXPECT_EQ(countOps(*fn, IROp::LoadV4), 1) << "Dead LoadV4 must be pruned, live LoadV4 kept";
 }
 
+TEST(IRPassTest, LoopUnrollingConstantTripCountEliminatesBranches) {
+    std::string src =
+        "kernel test(int* in, int* out) {\n"
+        "    for (int i = 0; i < 4; i = i + 1) {\n"
+        "        out[i] = in[i] * 2;\n"
+        "    }\n"
+        "}\n";
+    auto fn = compileToIR(src);
+    // Unrolled loop emits all 4 iterations straight into the entry block
+    EXPECT_EQ(fn.blocks.size(), 1) << "Unrolled loop must not generate additional control-flow basic blocks";
+    EXPECT_EQ(countOps(fn, IROp::Bra), 0);
+    EXPECT_EQ(countOps(fn, IROp::BraCond), 0);
+    EXPECT_EQ(countOps(fn, IROp::Load), 4);
+    EXPECT_EQ(countOps(fn, IROp::Store), 4);
+}
+
+TEST(IRPassTest, LoopUnrollingInductionVariableFoldsImmediateOffsets) {
+    std::string src =
+        "kernel test(int* in, int* out) {\n"
+        "    for (int i = 0; i < 4; i = i + 1) {\n"
+        "        out[i] = in[i] + 10;\n"
+        "    }\n"
+        "}\n";
+    auto fn = compileToIR(src);
+    EXPECT_EQ(countOps(fn, IROp::Load), 4);
+    EXPECT_EQ(countOps(fn, IROp::Store), 4);
+
+    Optimizer::runPasses(fn);
+
+    // After passes, MulWide of constant offset (i * 4) must fold completely into LoadImm
+    EXPECT_EQ(countOps(fn, IROp::MulWide), 0) << "Constant induction offsets should be folded away";
+    EXPECT_EQ(countOps(fn, IROp::Load), 4);
+    EXPECT_EQ(countOps(fn, IROp::Store), 4);
+}
+
+TEST(IRPassTest, LoopUnrollingNonConstantOrLargeTripCountPreserved) {
+    // Dynamic trip count loop
+    std::string srcDynamic =
+        "kernel test_dynamic(int* in, int* out, int n) {\n"
+        "    for (int i = 0; i < n; i = i + 1) {\n"
+        "        out[i] = in[i];\n"
+        "    }\n"
+        "}\n";
+    auto fnDyn = compileToIR(srcDynamic);
+    EXPECT_GT(fnDyn.blocks.size(), 1);
+    EXPECT_GT(countOps(fnDyn, IROp::Bra), 0);
+
+    // Trip count > 16 (threshold = 16)
+    std::string srcLarge =
+        "kernel test_large(int* in, int* out) {\n"
+        "    for (int i = 0; i < 32; i = i + 1) {\n"
+        "        out[i] = in[i];\n"
+        "    }\n"
+        "}\n";
+    auto fnLarge = compileToIR(srcLarge);
+    EXPECT_GT(fnLarge.blocks.size(), 1);
+    EXPECT_GT(countOps(fnLarge, IROp::Bra), 0);
+}
+
+TEST(IRPassTest, InstructionSchedulingHoistsLoadsBeforeAluAndStores) {
+    std::string src =
+        "kernel test(int* a, int* b) {\n"
+        "    for (int i = 0; i < 4; i = i + 1) {\n"
+        "        b[i] = a[i] * 2;\n"
+        "    }\n"
+        "}\n";
+    auto fn = compileToIR(src);
+    Optimizer::runPasses(fn);
+
+    // In the scheduled block, verify that independent global loads are hoisted
+    // before the store instructions
+    ASSERT_EQ(fn.blocks.size(), 1);
+    const auto& insts = fn.blocks[0].instructions;
+
+    int lastLoadIdx = -1;
+    int firstStoreIdx = -1;
+    for (int i = 0; i < static_cast<int>(insts.size()); ++i) {
+        if (insts[i].op == IROp::Load) {
+            lastLoadIdx = i;
+        }
+        if (insts[i].op == IROp::Store && firstStoreIdx == -1) {
+            firstStoreIdx = i;
+        }
+    }
+
+    ASSERT_NE(lastLoadIdx, -1);
+    ASSERT_NE(firstStoreIdx, -1);
+    EXPECT_LT(lastLoadIdx, firstStoreIdx) << "List scheduler must hoist independent loads before stores to hide memory latency!";
+}
+
+TEST(IRPassTest, InstructionSchedulingRespectsBarriers) {
+    std::string src =
+        "kernel test(int* a, int* b) {\n"
+        "    b[0] = a[0] * 2;\n"
+        "    barrier();\n"
+        "    b[1] = a[1] * 2;\n"
+        "}\n";
+    auto fn = compileToIR(src);
+    Optimizer::runPasses(fn);
+
+    ASSERT_EQ(fn.blocks.size(), 1);
+    const auto& insts = fn.blocks[0].instructions;
+
+    int barIdx = -1;
+    std::vector<int> storeIdxs;
+    for (int i = 0; i < static_cast<int>(insts.size()); ++i) {
+        if (insts[i].op == IROp::Bar) barIdx = i;
+        if (insts[i].op == IROp::Store) storeIdxs.push_back(i);
+    }
+
+    ASSERT_NE(barIdx, -1);
+    ASSERT_EQ(storeIdxs.size(), 2);
+    EXPECT_LT(storeIdxs[0], barIdx) << "Store 0 must not be hoisted/sunk across barrier()";
+    EXPECT_GT(storeIdxs[1], barIdx) << "Store 1 must not be hoisted/sunk across barrier()";
+}
+
+TEST(IRPassTest, InstructionSchedulingRespectsMemoryAliases) {
+    // In-place update: reads and writes to identical base buffer 'a'
+    std::string src =
+        "kernel test(int* a) {\n"
+        "    a[0] = a[0] + 1;\n"
+        "    a[1] = a[1] + 2;\n"
+        "}\n";
+    auto fn = compileToIR(src);
+    Optimizer::runPasses(fn);
+
+    ASSERT_EQ(fn.blocks.size(), 1);
+    const auto& insts = fn.blocks[0].instructions;
+
+    // Verify store to a[0] comes before load from a[1] (aliasing protection on same base)
+    int firstStoreIdx = -1;
+    int secondLoadIdx = -1;
+    int loadCount = 0;
+    for (int i = 0; i < static_cast<int>(insts.size()); ++i) {
+        if (insts[i].op == IROp::Load) {
+            loadCount++;
+            if (loadCount == 2) secondLoadIdx = i;
+        }
+        if (insts[i].op == IROp::Store && firstStoreIdx == -1) {
+            firstStoreIdx = i;
+        }
+    }
+
+    ASSERT_NE(firstStoreIdx, -1);
+    ASSERT_NE(secondLoadIdx, -1);
+    EXPECT_LT(firstStoreIdx, secondLoadIdx) << "In-place modifications to identical pointer base must preserve RAW/WAR ordering!";
+}
+
+
 
 
 

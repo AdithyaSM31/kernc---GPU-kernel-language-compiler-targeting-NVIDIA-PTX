@@ -1,9 +1,11 @@
 #include "kernc/Passes.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
 #include <variant>
+#include <vector>
 
 namespace kernc {
 
@@ -155,6 +157,23 @@ bool Optimizer::runConstantFolding(IRFunction& fn) {
                 }
             }
 
+            // MulWide constant folding (dst:s64 = s32 * s32)
+            if (inst.op == IROp::MulWide && src1IsConst && src2IsConst && inst.dst != 0) {
+                const auto& c1 = constTable[inst.src1];
+                const auto& c2 = constTable[inst.src2];
+                if (!c1.isFloat && !c2.isFloat) {
+                    int64_t prod = static_cast<int64_t>(c1.intVal) * static_cast<int64_t>(c2.intVal);
+                    inst.op = IROp::LoadImm;
+                    inst.src1 = 0;
+                    inst.src2 = 0;
+                    inst.type = IRType::S64;
+                    inst.immInt = static_cast<int32_t>(prod);
+                    constTable[inst.dst] = ConstVal{false, inst.immInt, 0.0f};
+                    changed = true;
+                    continue;
+                }
+            }
+
             // Single source constant folding (Neg, FNeg, Cvt)
             if (src1IsConst && inst.src2 == 0 && inst.dst != 0) {
                 const auto& c1 = constTable[inst.src1];
@@ -199,6 +218,23 @@ bool Optimizer::runConstantFolding(IRFunction& fn) {
             }
 
             // Algebraic identities and strength reduction
+            if (inst.op == IROp::AddS64) {
+                if (src2IsConst && !constTable[inst.src2].isFloat && constTable[inst.src2].intVal == 0) {
+                    inst.op = IROp::Mov;
+                    inst.type = IRType::S64;
+                    inst.src2 = 0;
+                    changed = true;
+                    continue;
+                }
+                if (src1IsConst && !constTable[inst.src1].isFloat && constTable[inst.src1].intVal == 0) {
+                    inst.op = IROp::Mov;
+                    inst.type = IRType::S64;
+                    inst.src1 = inst.src2;
+                    inst.src2 = 0;
+                    changed = true;
+                    continue;
+                }
+            }
             if (src2IsConst && !constTable[inst.src2].isFloat) {
                 int32_t val = constTable[inst.src2].intVal;
                 if ((inst.op == IROp::Add || inst.op == IROp::Sub) && val == 0) {
@@ -517,6 +553,275 @@ bool Optimizer::runDeadCodeElimination(IRFunction& fn) {
     return changedOverall;
 }
 
+namespace {
+
+static bool isFenceOrBarrier(IROp op) {
+    switch (op) {
+        case IROp::Bar:
+        case IROp::AtomicAdd:
+        case IROp::AtomicSub:
+        case IROp::AtomicMin:
+        case IROp::AtomicMax:
+        case IROp::AtomicAnd:
+        case IROp::AtomicOr:
+        case IROp::AtomicXor:
+        case IROp::AtomicExch:
+        case IROp::AtomicCas:
+        case IROp::ShflIdx:
+        case IROp::ShflDown:
+        case IROp::ShflUp:
+        case IROp::ShflBfly:
+        case IROp::VoteBallot:
+        case IROp::Activemask:
+        case IROp::Call:
+        case IROp::StoreRetval:
+        case IROp::Bra:
+        case IROp::BraCond:
+        case IROp::Ret:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static void getDefs(const IRInst& inst, std::vector<VReg>& defs) {
+    if (inst.dst != 0) defs.push_back(inst.dst);
+    for (VReg d : inst.dsts) {
+        if (d != 0) defs.push_back(d);
+    }
+}
+
+static void getUses(const IRInst& inst, std::vector<VReg>& uses) {
+    if (inst.src1 != 0) uses.push_back(inst.src1);
+    if (inst.src2 != 0) uses.push_back(inst.src2);
+    if (inst.src3 != 0) uses.push_back(inst.src3);
+    for (VReg a : inst.args) {
+        if (a != 0) uses.push_back(a);
+    }
+}
+
+static bool isLoadOp(IROp op) {
+    return op == IROp::Load || op == IROp::LoadV2 || op == IROp::LoadV4;
+}
+
+static bool isStoreOp(IROp op) {
+    return op == IROp::Store || op == IROp::StoreV2 || op == IROp::StoreV4;
+}
+
+static bool isMemOp(IROp op) {
+    return isLoadOp(op) || isStoreOp(op);
+}
+
+static int getInstBaseLatency(const IRInst& inst) {
+    if (isLoadOp(inst.op)) {
+        return (inst.space == AddrSpace::Global) ? 100 : 80;
+    }
+    if (inst.op == IROp::ReadSReg || inst.op == IROp::LoadParam || inst.op == IROp::LoadImm) {
+        return 50;
+    }
+    if (inst.op == IROp::MulWide || inst.op == IROp::AddS64 || inst.op == IROp::CvtaGlobal || inst.op == IROp::SharedAddr) {
+        return 40;
+    }
+    if (isStoreOp(inst.op)) {
+        return 1;
+    }
+    return 20;
+}
+
+static std::unordered_map<VReg, VReg> computePointerBases(const IRFunction& fn) {
+    std::unordered_map<VReg, VReg> pointerBase;
+    for (int iter = 0; iter < 4; ++iter) {
+        for (const auto& bb : fn.blocks) {
+            for (const auto& inst : bb.instructions) {
+                if (inst.dst == 0) continue;
+                if (inst.op == IROp::LoadParam || inst.op == IROp::SharedAddr) {
+                    pointerBase[inst.dst] = inst.dst;
+                } else if (inst.op == IROp::CvtaGlobal) {
+                    if (pointerBase.count(inst.src1)) pointerBase[inst.dst] = pointerBase[inst.src1];
+                } else if (inst.op == IROp::Mov) {
+                    if (pointerBase.count(inst.src1)) pointerBase[inst.dst] = pointerBase[inst.src1];
+                } else if (inst.op == IROp::AddS64 || inst.op == IROp::Add) {
+                    if (pointerBase.count(inst.src1)) pointerBase[inst.dst] = pointerBase[inst.src1];
+                    else if (pointerBase.count(inst.src2)) pointerBase[inst.dst] = pointerBase[inst.src2];
+                }
+            }
+        }
+    }
+    return pointerBase;
+}
+
+static std::vector<IRInst> scheduleWindow(const std::vector<IRInst>& window,
+                                          const std::unordered_map<VReg, VReg>& pointerBases) {
+    const size_t N = window.size();
+    if (N <= 1) return window;
+
+    std::vector<std::vector<int>> succs(N);
+    std::vector<std::vector<int>> preds(N);
+    std::vector<int> inDegree(N, 0);
+
+    std::vector<std::vector<VReg>> defs(N);
+    std::vector<std::vector<VReg>> uses(N);
+    std::vector<VReg> baseRegs(N, 0);
+
+    for (size_t i = 0; i < N; ++i) {
+        getDefs(window[i], defs[i]);
+        getUses(window[i], uses[i]);
+        if (isMemOp(window[i].op)) {
+            auto it = pointerBases.find(window[i].src1);
+            if (it != pointerBases.end()) {
+                baseRegs[i] = it->second;
+            }
+        }
+    }
+
+    auto addEdge = [&](int from, int to) {
+        for (int s : succs[from]) {
+            if (s == to) return;
+        }
+        succs[from].push_back(to);
+        preds[to].push_back(from);
+        inDegree[to]++;
+    };
+
+    for (size_t i = 0; i < N; ++i) {
+        for (size_t j = i + 1; j < N; ++j) {
+            bool dependent = false;
+            // RAW: instruction i defines a register read by instruction j
+            for (VReg d : defs[i]) {
+                for (VReg u : uses[j]) {
+                    if (d == u) { dependent = true; break; }
+                }
+                if (dependent) break;
+            }
+            // WAR: instruction i reads a register overwritten by instruction j
+            if (!dependent) {
+                for (VReg u : uses[i]) {
+                    for (VReg d : defs[j]) {
+                        if (u == d) { dependent = true; break; }
+                    }
+                    if (dependent) break;
+                }
+            }
+            // WAW: instruction i defines a register overwritten by instruction j
+            if (!dependent) {
+                for (VReg d1 : defs[i]) {
+                    for (VReg d2 : defs[j]) {
+                        if (d1 == d2) { dependent = true; break; }
+                    }
+                    if (dependent) break;
+                }
+            }
+            // Memory dependencies
+            if (!dependent && isMemOp(window[i].op) && isMemOp(window[j].op)) {
+                const auto& m1 = window[i];
+                const auto& m2 = window[j];
+                if (m1.space == m2.space) {
+                    if (isStoreOp(m1.op) && isStoreOp(m2.op)) {
+                        // Preserve relative store order
+                        dependent = true;
+                    } else if (isStoreOp(m1.op) || isStoreOp(m2.op)) {
+                        // Aliased store-load or load-store hazard
+                        VReg b1 = baseRegs[i];
+                        VReg b2 = baseRegs[j];
+                        if (b1 == 0 || b2 == 0 || b1 == b2) {
+                            dependent = true;
+                        }
+                    }
+                }
+            }
+            if (dependent) {
+                addEdge(static_cast<int>(i), static_cast<int>(j));
+            }
+        }
+    }
+
+    // Critical path depth computation
+    std::vector<int> priority(N, 0);
+    for (int i = static_cast<int>(N) - 1; i >= 0; --i) {
+        int maxSucc = 0;
+        for (int succ : succs[i]) {
+            maxSucc = std::max(maxSucc, priority[succ]);
+        }
+        priority[i] = getInstBaseLatency(window[i]) + maxSucc;
+    }
+
+    // List scheduling ready queue
+    std::vector<int> ready;
+    for (int i = 0; i < static_cast<int>(N); ++i) {
+        if (inDegree[i] == 0) {
+            ready.push_back(i);
+        }
+    }
+
+    std::vector<IRInst> scheduled;
+    scheduled.reserve(N);
+
+    while (!ready.empty()) {
+        auto bestIt = ready.begin();
+        for (auto it = ready.begin() + 1; it != ready.end(); ++it) {
+            int bestIdx = *bestIt;
+            int curIdx = *it;
+            if (priority[curIdx] > priority[bestIdx]) {
+                bestIt = it;
+            } else if (priority[curIdx] == priority[bestIdx] && curIdx < bestIdx) {
+                bestIt = it;
+            }
+        }
+        int u = *bestIt;
+        ready.erase(bestIt);
+        scheduled.push_back(window[u]);
+
+        for (int v : succs[u]) {
+            inDegree[v]--;
+            if (inDegree[v] == 0) {
+                ready.push_back(v);
+            }
+        }
+    }
+
+    return scheduled;
+}
+
+} // anonymous namespace
+
+bool Optimizer::runInstructionScheduling(IRFunction& fn) {
+    bool changedOverall = false;
+    auto pointerBases = computePointerBases(fn);
+
+    for (auto& bb : fn.blocks) {
+        std::vector<IRInst> newInstructions;
+        size_t idx = 0;
+        while (idx < bb.instructions.size()) {
+            if (isFenceOrBarrier(bb.instructions[idx].op)) {
+                newInstructions.push_back(bb.instructions[idx]);
+                ++idx;
+                continue;
+            }
+            size_t start = idx;
+            while (idx < bb.instructions.size() && !isFenceOrBarrier(bb.instructions[idx].op)) {
+                ++idx;
+            }
+            size_t count = idx - start;
+            if (count <= 1) {
+                newInstructions.push_back(bb.instructions[start]);
+                continue;
+            }
+            std::vector<IRInst> window(bb.instructions.begin() + start, bb.instructions.begin() + idx);
+            auto scheduled = scheduleWindow(window, pointerBases);
+            for (size_t k = 0; k < count; ++k) {
+                if (window[k].op != scheduled[k].op || window[k].dst != scheduled[k].dst || window[k].src1 != scheduled[k].src1) {
+                    changedOverall = true;
+                    break;
+                }
+            }
+            newInstructions.insert(newInstructions.end(), scheduled.begin(), scheduled.end());
+        }
+        bb.instructions = std::move(newInstructions);
+    }
+
+    return changedOverall;
+}
+
 bool Optimizer::runPasses(IRFunction& fn) {
     bool changed = false;
     // Iterate passes until convergence
@@ -528,6 +833,9 @@ bool Optimizer::runPasses(IRFunction& fn) {
         } else {
             break;
         }
+    }
+    if (runInstructionScheduling(fn)) {
+        changed = true;
     }
     return changed;
 }

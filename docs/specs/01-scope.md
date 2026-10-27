@@ -81,7 +81,7 @@ All built-in identifiers evaluate to 32-bit signed integer values (`int`). Their
 - Variable Declarations: `int x = expr;`, `float y;`.
 - Assignments: `x = expr;`, `ptr[idx] = expr;`.
 - Conditional: `if (cond) { ... } else { ... }`.
-- Loops: `while (cond) { ... }`, `for (init; cond; step) { ... }`.
+- Loops: `while (cond) { ... }`, `for (init; cond; step) { ... }`. Loops with constant bounds and step ($0 < T \le 16$) are automatically fully unrolled into straight-line instructions, eliminating `bra`, `bra.cond`, and `setp` branch overhead. Downstream list scheduling pipelines the unrolled memory accesses.
 - Return: `return;` -> `ret;`, which ends the calling thread (other threads continue).
   Kernels return void, so `return expr;` is an error.
 - Shared memory: `shared float buf[256];` (or `__shared__`) declares a per-block array in the

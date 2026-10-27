@@ -338,6 +338,8 @@ std::string PTXEmitter::emitFunction(const IRFunction& fn) {
                 case IROp::LoadImm:
                     if (inst.type == IRType::F32) {
                         ss << "    mov.f32 " << dst << ", " << formatFloatHex(inst.immFloat) << ";\n";
+                    } else if (inst.type == IRType::S64) {
+                        ss << "    mov.s64 " << dst << ", " << inst.immInt << ";\n";
                     } else if (inst.type == IRType::Pred) {
                         ss << "    mov.pred " << dst << ", " << (inst.immInt ? 1 : 0) << ";\n";
                     } else {

@@ -348,17 +348,30 @@ followed by `atom.add.s32`. `float` memory operands are supported for `add` and 
 hardware capabilities). Dead-code elimination (DCE) explicitly classifies all atomic operations as
 side-effecting so they are never pruned even if their return value is discarded.
 
+**12. Loop Unrolling & Basic Block Instruction Scheduling.**
+Constant trip-count `for` loops ($0 < T \le 16$, e.g., `for (int i = 0; i < 4; i = i + 1)`) are automatically
+detected and unrolled directly into straight-line instructions within the basic block, eliminating `bra`,
+`bra.cond`, and `setp` control-flow branch overhead. The unrolled induction variables are bound to constant
+registers, allowing downstream constant folding to fold element addresses (`base + i * 4`) and propagate
+constants. Following DCE, a local dependency DAG-based list scheduler (`Optimizer::runInstructionScheduling`)
+schedules instructions within basic blocks using latency-aware priority heuristics: global loads (base
+latency 100) are hoisted early to hide the 200–400 cycle memory latency on Ampere (`sm_86`), independent ALU
+operations (latency 20) are interleaved to maximize Instruction-Level Parallelism (ILP), and stores (latency 1)
+are sunk to the end. The scheduler enforces strict fencing across `barrier()`, atomic operations, warp
+intrinsics, calls, and branches, while respecting RAW, WAR, and WAW memory dependencies. SASS disassembly via
+`nvdisasm` verifies that unrolled loops emit pipelined `LDG.E` / `LDG.E.128` instructions with zero loop branch instructions.
+
 ---
 
 ## Testing
 
 | Suite | Count | What it checks |
 |---|---|---|
-| Unit tests (GoogleTest) | 86 | Lexer 9, parser 14, Sema 31 (accept/reject, type/arity rules, diagnostic locations), IR and PTX 32 |
-| GPU end-to-end (Driver API) | 23 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
+| Unit tests (GoogleTest) | 92 | Lexer 9, parser 14, Sema 31 (accept/reject, type/arity rules, diagnostic locations), IR, passes, scheduling & PTX 38 |
+| GPU end-to-end (Driver API) | 24 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
 | Diagnostics | 1 suite, 8 files | `tests/diagnostic/err_*.kern` must fail with the expected message (and location, where given) |
 | ptxas acceptance | 6 | Every file in `examples/` assembles with `ptxas -arch=sm_86` |
-| ptxas regression | 20 | `tests/regress/*.kern` (10 kernels) assemble at both `-O0` and `-O1` |
+| ptxas regression | 22 | `tests/regress/*.kern` (11 kernels) assemble at both `-O0` and `-O1` |
 | Line tables | 2 | `kernc -lineinfo` → ptxas → `nvdisasm --print-line-info`; each `//@ REGEX` line must own matching SASS |
 | Runner CLI e2e | 1 suite, 20 stages | `kernc-runner` driver invocation, argument marshaling, device execution and error validation |
 
@@ -379,7 +392,8 @@ The GPU tests cover:
 - a differential test where `-O0` and `-O1` must give bit-identical results on edge-case
   constants;
 - a differential test where `-O0` (GPU `div.s32`/`rem.s32`) and `-O1` (strength-reduced shifts/masks)
-  must give bit-identical results across positive, negative, zero, and `INT_MIN` values for `/ 2^k` and `% 2^k`.
+  must give bit-identical results across positive, negative, zero, and `INT_MIN` values for `/ 2^k` and `% 2^k`;
+- loop unrolling and latency-hiding instruction scheduling across a 5-point stencil filter, 8-element dot-product reduction, and pipelined multi-stream load/ALU/store sequences at `-O0` and `-O1` vs CPU reference.
 
 Two techniques do most of the work:
 
@@ -389,6 +403,7 @@ Two techniques do most of the work:
   - the old float-to-int fold fails the differential test;
   - `setp.ne` instead of `setp.neu` fails the NaN case;
   - `shfl.sync.up` instead of `shfl.sync.down` fails the warp tree reduction test;
+  - inverting list scheduling priority (stores high, loads low) fails the load-hoisting latency check (`lastLoadIdx < firstStoreIdx`);
   - removing `bar.sync` fails the block-reverse test, first at thread 64, the first thread of
     the third warp, which read data before its partner warp had written it;
   - removing statement locations fails all six line-table checks;

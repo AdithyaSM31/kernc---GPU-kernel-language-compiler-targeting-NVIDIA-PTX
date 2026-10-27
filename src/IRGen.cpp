@@ -445,7 +445,212 @@ void IRGen::emitWhile(const WhileStmt& stmt, IRFunction& fn) {
     fn.addBlock(endLabel);
 }
 
+bool IRGen::extractIntConstant(const Expr* expr, int64_t& outVal) {
+    if (!expr) return false;
+    if (auto* lit = dynamic_cast<const IntLiteralExpr*>(expr)) {
+        outVal = lit->value;
+        return true;
+    }
+    if (auto* un = dynamic_cast<const UnaryExpr*>(expr)) {
+        if (un->op == UnaryOp::Neg) {
+            int64_t sub = 0;
+            if (extractIntConstant(un->operand.get(), sub)) {
+                outVal = -sub;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool IRGen::hasAssignmentTo(const Stmt& stmt, const std::string& varName) {
+    if (auto* assign = dynamic_cast<const AssignStmt*>(&stmt)) {
+        if (auto* id = dynamic_cast<const IdentExpr*>(assign->target.get())) {
+            if (id->name == varName) return true;
+        }
+        return false;
+    }
+    if (auto* varDecl = dynamic_cast<const VarDeclStmt*>(&stmt)) {
+        if (varDecl->name == varName) return true;
+        return false;
+    }
+    if (auto* block = dynamic_cast<const BlockStmt*>(&stmt)) {
+        for (const auto& s : block->stmts) {
+            if (hasAssignmentTo(*s, varName)) return true;
+        }
+        return false;
+    }
+    if (auto* ifStmt = dynamic_cast<const IfStmt*>(&stmt)) {
+        if (ifStmt->thenBranch && hasAssignmentTo(*ifStmt->thenBranch, varName)) return true;
+        if (ifStmt->elseBranch && hasAssignmentTo(*ifStmt->elseBranch, varName)) return true;
+        return false;
+    }
+    if (auto* whileStmt = dynamic_cast<const WhileStmt*>(&stmt)) {
+        if (whileStmt->body && hasAssignmentTo(*whileStmt->body, varName)) return true;
+        return false;
+    }
+    if (auto* forStmt = dynamic_cast<const ForStmt*>(&stmt)) {
+        if (forStmt->init && hasAssignmentTo(*forStmt->init, varName)) return true;
+        if (forStmt->step && hasAssignmentTo(*forStmt->step, varName)) return true;
+        if (forStmt->body && hasAssignmentTo(*forStmt->body, varName)) return true;
+        return false;
+    }
+    return false;
+}
+
+bool IRGen::tryGetConstantTripCount(const ForStmt& stmt, int64_t& tripCount, int64_t& start, int64_t& step, std::string& varName) {
+    if (!stmt.init || !stmt.cond || !stmt.step || !stmt.body) {
+        return false;
+    }
+
+    // 1. Init: int i = start; or i = start;
+    if (auto* decl = dynamic_cast<const VarDeclStmt*>(stmt.init.get())) {
+        if (!decl->type.isInt() || !decl->init) return false;
+        varName = decl->name;
+        if (!extractIntConstant(decl->init.get(), start)) return false;
+    } else if (auto* assign = dynamic_cast<const AssignStmt*>(stmt.init.get())) {
+        auto* id = dynamic_cast<const IdentExpr*>(assign->target.get());
+        if (!id || !assign->value) return false;
+        varName = id->name;
+        if (!extractIntConstant(assign->value.get(), start)) return false;
+    } else {
+        return false;
+    }
+
+    // 2. Cond: i < C_end, i <= C_end, etc.
+    auto* condBin = dynamic_cast<const BinaryExpr*>(stmt.cond.get());
+    if (!condBin) return false;
+
+    int64_t condConst = 0;
+    BinaryOp op = condBin->op;
+    bool varOnLhs = false;
+
+    if (auto* id = dynamic_cast<const IdentExpr*>(condBin->lhs.get())) {
+        if (id->name == varName && extractIntConstant(condBin->rhs.get(), condConst)) {
+            varOnLhs = true;
+        }
+    }
+    if (!varOnLhs) {
+        if (auto* id = dynamic_cast<const IdentExpr*>(condBin->rhs.get())) {
+            if (id->name == varName && extractIntConstant(condBin->lhs.get(), condConst)) {
+                switch (op) {
+                    case BinaryOp::Lt: op = BinaryOp::Gt; break;
+                    case BinaryOp::Gt: op = BinaryOp::Lt; break;
+                    case BinaryOp::Le: op = BinaryOp::Ge; break;
+                    case BinaryOp::Ge: op = BinaryOp::Le; break;
+                    case BinaryOp::Eq: break;
+                    case BinaryOp::Ne: break;
+                    default: return false;
+                }
+                varOnLhs = true;
+            }
+        }
+    }
+    if (!varOnLhs) return false;
+
+    // 3. Step: i = i + step or i = i - step
+    const AssignStmt* stepAssign = dynamic_cast<const AssignStmt*>(stmt.step.get());
+    if (!stepAssign) return false;
+    auto* stepTarget = dynamic_cast<const IdentExpr*>(stepAssign->target.get());
+    if (!stepTarget || stepTarget->name != varName) return false;
+    auto* stepBin = dynamic_cast<const BinaryExpr*>(stepAssign->value.get());
+    if (!stepBin) return false;
+
+    int64_t stepVal = 0;
+    step = 0;
+    if (stepBin->op == BinaryOp::Add) {
+        if (auto* id = dynamic_cast<const IdentExpr*>(stepBin->lhs.get())) {
+            if (id->name == varName && extractIntConstant(stepBin->rhs.get(), stepVal)) {
+                step = stepVal;
+            }
+        }
+        if (step == 0) {
+            if (auto* id = dynamic_cast<const IdentExpr*>(stepBin->rhs.get())) {
+                if (id->name == varName && extractIntConstant(stepBin->lhs.get(), stepVal)) {
+                    step = stepVal;
+                }
+            }
+        }
+    } else if (stepBin->op == BinaryOp::Sub) {
+        if (auto* id = dynamic_cast<const IdentExpr*>(stepBin->lhs.get())) {
+            if (id->name == varName && extractIntConstant(stepBin->rhs.get(), stepVal)) {
+                step = -stepVal;
+            }
+        }
+    }
+    if (step == 0) return false;
+
+    // 4. Verify loop body does not mutate varName
+    if (hasAssignmentTo(*stmt.body, varName)) return false;
+
+    // 5. Trip count
+    if (step > 0) {
+        if (op == BinaryOp::Lt) {
+            if (start >= condConst) tripCount = 0;
+            else tripCount = (condConst - start + step - 1) / step;
+        } else if (op == BinaryOp::Le) {
+            if (start > condConst) tripCount = 0;
+            else tripCount = (condConst - start) / step + 1;
+        } else if (op == BinaryOp::Ne) {
+            if (condConst < start || ((condConst - start) % step != 0)) return false;
+            tripCount = (condConst - start) / step;
+        } else {
+            return false;
+        }
+    } else {
+        int64_t posStep = -step;
+        if (op == BinaryOp::Gt) {
+            if (start <= condConst) tripCount = 0;
+            else tripCount = (start - condConst + posStep - 1) / posStep;
+        } else if (op == BinaryOp::Ge) {
+            if (start < condConst) tripCount = 0;
+            else tripCount = (start - condConst) / posStep + 1;
+        } else if (op == BinaryOp::Ne) {
+            if (start < condConst || ((start - condConst) % posStep != 0)) return false;
+            tripCount = (start - condConst) / posStep;
+        } else {
+            return false;
+        }
+    }
+
+    return (tripCount >= 0);
+}
+
 void IRGen::emitFor(const ForStmt& stmt, IRFunction& fn) {
+    int64_t tripCount = 0;
+    int64_t start = 0;
+    int64_t step = 0;
+    std::string varName;
+    if (unrollLoops_ && tryGetConstantTripCount(stmt, tripCount, start, step, varName)) {
+        if (tripCount > 0 && tripCount <= 16) {
+            enterScope();
+            bool isDecl = dynamic_cast<const VarDeclStmt*>(stmt.init.get()) != nullptr;
+            for (int64_t k = 0; k < tripCount; ++k) {
+                enterScope();
+                int64_t curVal = start + k * step;
+                VReg iterReg = fn.freshReg(IRType::S32);
+                IRInst ldimm{IROp::LoadImm, iterReg, 0, 0, IRType::S32};
+                ldimm.immInt = static_cast<int32_t>(curVal);
+                fn.emit(ldimm);
+                setVar(varName, iterReg, Type::makeInt());
+                emitStmt(*stmt.body, fn);
+                exitScope();
+            }
+            if (!isDecl) {
+                const VarInfo* vInfo = getVar(varName);
+                if (vInfo) {
+                    VReg finalReg = fn.freshReg(IRType::S32);
+                    IRInst ldimm{IROp::LoadImm, finalReg, 0, 0, IRType::S32};
+                    ldimm.immInt = static_cast<int32_t>(start + tripCount * step);
+                    fn.emit(ldimm);
+                    fn.emit(IRInst{IROp::Mov, vInfo->reg, finalReg, 0, IRType::S32});
+                }
+            }
+            exitScope();
+            return;
+        }
+    }
+
     enterScope();
     if (stmt.init) {
         emitStmt(*stmt.init, fn);

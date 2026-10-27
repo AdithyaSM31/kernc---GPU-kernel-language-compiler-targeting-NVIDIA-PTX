@@ -2048,6 +2048,183 @@ TEST_F(KernelE2ETest, VectorMemoryOperationsMatchCpu) {
     }
 }
 
+TEST_F(KernelE2ETest, LoopUnrollingAndSchedulingMatchCpu) {
+    const std::string kernelSrc = R"(
+kernel test_stencil_unroll(float* in, float* out, int n) {
+    int tid = thread_idx;
+    if (tid < n) {
+        float sum = 0.0;
+        for (int i = 0; i < 5; i = i + 1) {
+            sum = sum + in[tid + i];
+        }
+        out[tid] = sum;
+    }
+}
+
+kernel test_dot_product_unroll(int* a, int* b, int* out, int n) {
+    int tid = thread_idx;
+    if (tid < n) {
+        int acc = 0;
+        for (int i = 0; i < 8; i = i + 1) {
+            acc = acc + a[tid * 8 + i] * b[tid * 8 + i];
+        }
+        out[tid] = acc;
+    }
+}
+
+kernel test_sched_multistream(float* out, float* in_x, float* in_y, int n) {
+    int tid = thread_idx;
+    if (tid < n) {
+        for (int i = 0; i < 4; i = i + 1) {
+            float x = in_x[tid * 4 + i];
+            float y = in_y[tid * 4 + i];
+            out[tid * 4 + i] = x * 2.0 + y * 3.0;
+        }
+    }
+}
+)";
+
+    for (bool optimize : {false, true}) {
+        std::string optName = optimize ? "-O1" : "-O0";
+        std::string ptx = compileSourceToPTX(kernelSrc, optimize);
+        ASSERT_FALSE(ptx.empty()) << "Compilation failed under " << optName;
+
+        CUmodule mod = loadPTX(ptx);
+        const int N = 64;
+        const int kBlockSize = 64;
+        const int kGridSize = 1;
+
+        // 1. 5-point stencil filter test
+        {
+            CUfunction func;
+            CHECK_CUDA(cuModuleGetFunction(&func, mod, "test_stencil_unroll"));
+
+            int inLen = N + 4;
+            std::vector<float> h_in(inLen), h_out(N, 0.0f), h_ref(N, 0.0f);
+            for (int i = 0; i < inLen; ++i) {
+                h_in[i] = static_cast<float>(i + 1) * 0.25f;
+            }
+            for (int tid = 0; tid < N; ++tid) {
+                float sum = 0.0f;
+                for (int i = 0; i < 5; ++i) {
+                    sum += h_in[tid + i];
+                }
+                h_ref[tid] = sum;
+            }
+
+            CUdeviceptr d_in, d_out;
+            CHECK_CUDA(cuMemAlloc(&d_in, inLen * sizeof(float)));
+            CHECK_CUDA(cuMemAlloc(&d_out, N * sizeof(float)));
+            CHECK_CUDA(cuMemcpyHtoD(d_in, h_in.data(), inLen * sizeof(float)));
+
+            int n_arg = N;
+            void* args[] = { &d_in, &d_out, &n_arg };
+            CHECK_CUDA(cuLaunchKernel(func, kGridSize, 1, 1, kBlockSize, 1, 1, 0, 0, args, 0));
+            CHECK_CUDA(cuCtxSynchronize());
+
+            CHECK_CUDA(cuMemcpyDtoH(h_out.data(), d_out, N * sizeof(float)));
+
+            for (int i = 0; i < N; ++i) {
+                EXPECT_FLOAT_EQ(h_out[i], h_ref[i]) << optName << " stencil failed at " << i;
+            }
+
+            CHECK_CUDA(cuMemFree(d_in));
+            CHECK_CUDA(cuMemFree(d_out));
+        }
+
+        // 2. 8-element dot-product reduction test
+        {
+            CUfunction func;
+            CHECK_CUDA(cuModuleGetFunction(&func, mod, "test_dot_product_unroll"));
+
+            int totalElements = N * 8;
+            std::vector<int32_t> h_a(totalElements), h_b(totalElements);
+            std::vector<int32_t> h_out(N, 0), h_ref(N, 0);
+
+            for (int i = 0; i < totalElements; ++i) {
+                h_a[i] = (i % 7) - 3;
+                h_b[i] = ((i * 3) % 11) - 5;
+            }
+            for (int tid = 0; tid < N; ++tid) {
+                int acc = 0;
+                for (int i = 0; i < 8; ++i) {
+                    acc += h_a[tid * 8 + i] * h_b[tid * 8 + i];
+                }
+                h_ref[tid] = acc;
+            }
+
+            CUdeviceptr d_a, d_b, d_out;
+            CHECK_CUDA(cuMemAlloc(&d_a, totalElements * sizeof(int32_t)));
+            CHECK_CUDA(cuMemAlloc(&d_b, totalElements * sizeof(int32_t)));
+            CHECK_CUDA(cuMemAlloc(&d_out, N * sizeof(int32_t)));
+
+            CHECK_CUDA(cuMemcpyHtoD(d_a, h_a.data(), totalElements * sizeof(int32_t)));
+            CHECK_CUDA(cuMemcpyHtoD(d_b, h_b.data(), totalElements * sizeof(int32_t)));
+
+            int n_arg = N;
+            void* args[] = { &d_a, &d_b, &d_out, &n_arg };
+            CHECK_CUDA(cuLaunchKernel(func, kGridSize, 1, 1, kBlockSize, 1, 1, 0, 0, args, 0));
+            CHECK_CUDA(cuCtxSynchronize());
+
+            CHECK_CUDA(cuMemcpyDtoH(h_out.data(), d_out, N * sizeof(int32_t)));
+
+            for (int i = 0; i < N; ++i) {
+                EXPECT_EQ(h_out[i], h_ref[i]) << optName << " dot product failed at " << i;
+            }
+
+            CHECK_CUDA(cuMemFree(d_a));
+            CHECK_CUDA(cuMemFree(d_b));
+            CHECK_CUDA(cuMemFree(d_out));
+        }
+
+        // 3. Pipelined multi-stream load/ALU/store test
+        {
+            CUfunction func;
+            CHECK_CUDA(cuModuleGetFunction(&func, mod, "test_sched_multistream"));
+
+            int totalElements = N * 4;
+            std::vector<float> h_x(totalElements), h_y(totalElements);
+            std::vector<float> h_out(totalElements, 0.0f), h_ref(totalElements, 0.0f);
+
+            for (int i = 0; i < totalElements; ++i) {
+                h_x[i] = static_cast<float>(i) * 1.5f + 0.25f;
+                h_y[i] = static_cast<float>(i) * -0.75f + 10.0f;
+            }
+            for (int tid = 0; tid < N; ++tid) {
+                for (int i = 0; i < 4; ++i) {
+                    int idx = tid * 4 + i;
+                    h_ref[idx] = h_x[idx] * 2.0f + h_y[idx] * 3.0f;
+                }
+            }
+
+            CUdeviceptr d_x, d_y, d_out;
+            CHECK_CUDA(cuMemAlloc(&d_x, totalElements * sizeof(float)));
+            CHECK_CUDA(cuMemAlloc(&d_y, totalElements * sizeof(float)));
+            CHECK_CUDA(cuMemAlloc(&d_out, totalElements * sizeof(float)));
+
+            CHECK_CUDA(cuMemcpyHtoD(d_x, h_x.data(), totalElements * sizeof(float)));
+            CHECK_CUDA(cuMemcpyHtoD(d_y, h_y.data(), totalElements * sizeof(float)));
+
+            int n_arg = N;
+            void* args[] = { &d_out, &d_x, &d_y, &n_arg };
+            CHECK_CUDA(cuLaunchKernel(func, kGridSize, 1, 1, kBlockSize, 1, 1, 0, 0, args, 0));
+            CHECK_CUDA(cuCtxSynchronize());
+
+            CHECK_CUDA(cuMemcpyDtoH(h_out.data(), d_out, totalElements * sizeof(float)));
+
+            for (int i = 0; i < totalElements; ++i) {
+                EXPECT_FLOAT_EQ(h_out[i], h_ref[i]) << optName << " multistream sched failed at " << i;
+            }
+
+            CHECK_CUDA(cuMemFree(d_x));
+            CHECK_CUDA(cuMemFree(d_y));
+            CHECK_CUDA(cuMemFree(d_out));
+        }
+
+        CHECK_CUDA(cuModuleUnload(mod));
+    }
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     ::testing::AddGlobalTestEnvironment(new CudaEnvironment);
