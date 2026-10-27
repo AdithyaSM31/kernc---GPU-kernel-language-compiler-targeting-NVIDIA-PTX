@@ -35,7 +35,7 @@ What it supports:
 - `.file` / `.loc` source line info with `-lineinfo`
 - diagnostics with `file:line:column` and a caret
 
-The suite has 163 tests, and all of them pass, both in a normal build and under
+The suite has 164 tests, and all of them pass, both in a normal build and under
 UndefinedBehaviorSanitizer.
 
 ---
@@ -79,6 +79,13 @@ Execute a kernel on the GPU (`kernc-runner`):
     --arg i32:1024 \
     --dump 2:8
 ```
+
+`kernc-runner` JIT-loads the PTX through the CUDA Driver API and launches it with typed arguments,
+1D/2D/3D grid and block geometry, initialized device buffers (`zeros`, `seq`, `rand`) and
+`--dump` to print results. Before launching, it checks every `--arg` against the kernel's PTX
+`.param` list: the count, and the type (`.f32` needs `f32:`, `.s32` needs `i32:`, a `.u64` pointer
+needs `buf:`). A mismatch is reported by argument number instead of faulting or silently producing
+wrong results.
 
 | Runner Option | Meaning |
 |---|---|
@@ -367,13 +374,13 @@ intrinsics, calls, and branches, while respecting RAW, WAR, and WAW memory depen
 
 | Suite | Count | What it checks |
 |---|---|---|
-| Unit tests (GoogleTest) | 102 | Lexer 9, parser 15, Sema 33 (accept/reject, type/arity rules, diagnostic locations), IR, passes, scheduling & PTX 45 |
+| Unit tests (GoogleTest) | 103 | Lexer 9, parser 15, Sema 34 (accept/reject, type/arity rules, diagnostic locations), IR, passes, scheduling & PTX 45 |
 | GPU end-to-end (Driver API) | 27 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
 | Diagnostics | 1 suite, 8 files | `tests/diagnostic/err_*.kern` must fail with the expected message (and location, where given) |
 | ptxas acceptance | 6 | Every file in `examples/` assembles with `ptxas -arch=sm_86` |
 | ptxas regression | 24 | `tests/regress/*.kern` (12 kernels) assemble at both `-O0` and `-O1` |
 | Line tables | 2 | `kernc -lineinfo` → ptxas → `nvdisasm --print-line-info`; each `//@ REGEX` line must own matching SASS |
-| Runner CLI e2e | 1 suite, 20 stages | `kernc-runner` driver invocation, argument marshaling, device execution and error validation |
+| Runner CLI e2e | 1 suite, 21 stages | `kernc-runner` driver invocation, argument marshaling, device execution, error validation, and `--arg` type checking against the PTX `.param` types |
 
 The GPU tests cover:
 
@@ -433,6 +440,8 @@ these bugs:
 | Scheduler treated different base pointers as non-aliasing | **Wrong results at `-O1`**: with `a == b`, `a[i] = 42; out[i] = b[i];` read the stale value, because the load moved above the store (two accesses to one shared array too) |
 | Shift folding masked the count to 5 bits (x86) | `1 << 32` folded to 1 and `1000 >> 40` to 3, but PTX clamps the count, so the GPU gives 0 at `-O0` |
 | Vector intrinsic offsets counted scalars | `load_int4(p, 1)` issued a 16-byte load at a 4-byte boundary: **`CUDA_ERROR_MISALIGNED_ADDRESS`** |
+| Atomics accepted vector targets as int | `atomic_add` on a `float4*` emitted an integer `atom.add.s32` on float data |
+| `kernc-runner` checked only the argument count | An `i32` for a pointer faulted with `CUDA_ERROR_ILLEGAL_ADDRESS`; an `i32` for a float or a buffer for an int printed **`Success!` with wrong results** |
 
 Every fix is in the commit history, together with a test that failed before the fix.
 
@@ -460,10 +469,6 @@ Every fix is in the commit history, together with a test that failed before the 
   `bool` kernel parameters.
 - **Line info is per statement**, not per expression. Also, `-(2147483648)` is accepted
   because parentheses aren't kept in the AST; Java rejects it.
-- **`tools/runner` (`kernc-runner`) is a full CUDA Driver API CLI execution utility.** It launches
-  compiled PTX kernels with typed arguments (`--arg`), configurable grid/block geometry (`-g`, `-b`),
-  device buffer initialization (`zeros`, `seq`, `rand`), Driver JIT logging (`-v`), and output buffer
-  inspection (`--dump`).
 - **compute-sanitizer can't run under WSL here** until the Windows debugger interface is
   enabled (run `EnableDebuggerInterface.bat` as administrator). With it, memcheck could report
   faults against `.kern` lines using `-lineinfo`.

@@ -144,7 +144,7 @@ Syntax forms:
 - Array subscript notation: `atomic_add(ptr[index], val)` or `atomic_cas(ptr[index], cmp, val)`.
 
 Type rules in `Sema`:
-- First operand (`ptr`) must be a pointer (`int*`, `float*`) or a shared array (`shared int`, `shared float`).
+- First operand (`ptr`) must be a pointer (`int*`, `float*`) or a shared array (`shared int`, `shared float`). Vector targets (`int4*`, `float2*`, `shared int4`, or a vector element such as `p[i]` on an `int4*`) are rejected: atomics operate on a single `int` or `float`.
 - `add` and `exch` accept both `int` and `float` memory targets (return type matches pointee type).
 - `sub`, `min`, `max`, `and`, `or`, `xor`, and `cas` accept only `int` memory targets (float targets produce compile-time diagnostics).
 - `index`, `cmp`, and bitwise `val` operands must be `int`.

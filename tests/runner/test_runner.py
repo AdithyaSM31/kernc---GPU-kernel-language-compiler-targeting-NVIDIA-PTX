@@ -481,6 +481,27 @@ def main():
              "--arg", "f32: 2.5", "--arg", "buf:f32:16:zeros",
              "--arg", "buf:f32:16:zeros", "--arg", "i32:16"], expect_zero=False)
 
+    print("=== Test 21: --arg types must match the PTX .param types ===")
+    # saxpy's parameters are (.f32 a, .u64 x, .u64 y, .s32 n). A mismatched --arg used to be
+    # launched anyway: an i32 for a pointer faulted with CUDA_ERROR_ILLEGAL_ADDRESS, and an i32
+    # for a float or a buffer for an int reported Success! with silently wrong results.
+    mismatches = [
+        (["i32:2", "buf:f32:8:seq", "buf:f32:8:seq", "i32:8"], 0, "float"),
+        (["f32:2", "i32:5", "buf:f32:8:seq", "i32:8"], 1, "pointer"),
+        (["f32:2", "buf:f32:8:seq", "buf:f32:8:seq", "buf:i32:8:seq"], 3, "int"),
+        (["f32:2", "buf:f32:8:seq", "buf:f32:8:seq", "f32:8"], 3, "int"),
+    ]
+    for specs, bad_index, expected_kind in mismatches:
+        cmd = [runner, saxpy_ptx, "saxpy", "--grid", "1", "--block", "8"]
+        for s in specs:
+            cmd += ["--arg", s]
+        p_bad = run_cmd(cmd, expect_zero=False)
+        err = p_bad.stderr
+        assert f"argument {bad_index}" in err and expected_kind in err, \
+            f"Expected a type error for argument {bad_index} ({expected_kind}), got:\n{err}"
+        assert "Launching kernel" not in p_bad.stdout, \
+            f"Mismatched arguments must be rejected before launch:\n{p_bad.stdout}"
+
     print("All runner tests passed cleanly!")
 
 if __name__ == "__main__":

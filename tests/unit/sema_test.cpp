@@ -272,6 +272,24 @@ TEST(SemaTest, DeviceFunctionErrors) {
     }
 }
 
+TEST(SemaTest, AtomicsRejectVectorTargets) {
+    // Atomics operate on one int or float. A vector target used to be accepted and treated as
+    // int, so atomic_add on a float4* emitted an integer atom.add.s32 on float data.
+    const std::pair<const char*, const char*> cases[] = {
+        {"kernel k(int4* p) { atomic_add(p, 0, 1); }", "does not support 'int4*' memory operand"},
+        {"kernel k(float4* p) { atomic_add(p, 0, 1.0); }", "does not support 'float4*' memory operand"},
+        {"kernel k(float2* p) { atomic_exch(p, 1, 2.0); }", "does not support 'float2*' memory operand"},
+        {"kernel k(int4* p) { atomic_cas(p[0], 1, 2); }", "does not support 'int4' memory operand"},
+        {"kernel k(int* o) { shared int4 s[4]; atomic_add(s, 0, 1); }",
+         "does not support 'shared int4[]' memory operand"},
+    };
+    for (const auto& [src, expected] : cases) {
+        DiagnosticsEngine diag;
+        EXPECT_FALSE(checkSource(src, diag)) << src;
+        EXPECT_NE(diag.formatAll().find(expected), std::string::npos) << src << "\n" << diag.formatAll();
+    }
+}
+
 TEST(SemaTest, NonIntSubscript) {
     std::string src = "kernel test(float* p) {\n"
                       "    float y = p[1.5];\n"

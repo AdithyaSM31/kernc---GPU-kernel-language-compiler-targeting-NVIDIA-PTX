@@ -97,7 +97,35 @@ static std::string stripPtxComments(const std::string& src) {
     return clean;
 }
 
-static bool getExpectedParamCountFromPTX(const std::string& rawPtx, const std::string& kernelName, size_t& count) {
+// Reads the PTX type token (".u64", ".f32", ...) of the .param that starts at `pos`, skipping
+// an optional ".align N" state-space qualifier. Returns "" if there is none.
+static std::string readParamType(const std::string& block, size_t pos) {
+    auto skipSpace = [&](size_t p) {
+        while (p < block.size() && std::isspace(static_cast<unsigned char>(block[p]))) ++p;
+        return p;
+    };
+    auto readToken = [&](size_t& p) {
+        size_t start = p;
+        while (p < block.size() && !std::isspace(static_cast<unsigned char>(block[p])) &&
+               block[p] != ',' && block[p] != ')') {
+            ++p;
+        }
+        return block.substr(start, p - start);
+    };
+    size_t p = skipSpace(pos);
+    std::string tok = readToken(p);
+    if (tok == ".align") {
+        p = skipSpace(p);
+        readToken(p); // alignment value
+        p = skipSpace(p);
+        tok = readToken(p);
+    }
+    return (!tok.empty() && tok[0] == '.') ? tok : "";
+}
+
+static bool getExpectedParamCountFromPTX(const std::string& rawPtx, const std::string& kernelName, size_t& count,
+                                         std::vector<std::string>& types) {
+    types.clear();
     std::string ptx = stripPtxComments(rawPtx);
     size_t pos = 0;
     while (true) {
@@ -157,6 +185,7 @@ static bool getExpectedParamCountFromPTX(const std::string& rawPtx, const std::s
                 std::isspace(static_cast<unsigned char>(paramBlock[afterPos]));
             if (validBefore && validAfter) {
                 ++params;
+                types.push_back(readParamType(paramBlock, afterPos));
             }
             paramPos += 6;
         }
@@ -645,11 +674,41 @@ int main(int argc, char** argv) {
     }
 
     size_t expectedParamCount = 0;
-    if (getExpectedParamCountFromPTX(ptxSource, kernelName, expectedParamCount)) {
+    std::vector<std::string> paramTypes;
+    if (getExpectedParamCountFromPTX(ptxSource, kernelName, expectedParamCount, paramTypes)) {
         if (rawArgSpecs.size() != expectedParamCount) {
             std::cerr << "Error: Kernel '" << kernelName << "' expects " << expectedParamCount
                       << " argument(s), but " << rawArgSpecs.size() << " were provided.\n";
             return 1;
+        }
+        // Each --arg must match its .param type. cuLaunchKernel copies as many bytes as the
+        // .param declares, so a mismatch reads past a 4-byte host value (i32 for a pointer)
+        // or silently reinterprets bits (i32 for a float, a buffer address for an int).
+        for (size_t i = 0; i < paramTypes.size(); ++i) {
+            const std::string& t = paramTypes[i];
+            const char* need = nullptr;
+            bool ok = false;
+            ArgType given = parsedSpecs[i].type;
+            if (t == ".f32") {
+                need = "a float (f32:<val>)";
+                ok = (given == ArgType::F32);
+            } else if (t == ".s32" || t == ".u32" || t == ".b32") {
+                need = "an int (i32:<val>)";
+                ok = (given == ArgType::I32);
+            } else if (t == ".u64" || t == ".b64" || t == ".s64") {
+                need = "a pointer (buf:<type>:<N>:<init>)";
+                ok = (given == ArgType::BUF_I32 || given == ArgType::BUF_F32);
+            } else {
+                std::cerr << "Error: argument " << i << " of kernel '" << kernelName
+                          << "' has PTX type '" << t << "', which kernc-runner does not support.\n";
+                return 1;
+            }
+            if (!ok) {
+                std::cerr << "Error: argument " << i << " ('" << rawArgSpecs[i] << "') does not match"
+                          << " kernel '" << kernelName << "': its PTX parameter is " << t
+                          << ", which needs " << need << ".\n";
+                return 1;
+            }
         }
     }
 

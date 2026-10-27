@@ -59,4 +59,5 @@
   - Output inspection via `--dump <arg_index>[:<count>]` verifying element-by-element correctness against mathematical expectations.
   - Driver JIT compilation logging (`CU_JIT_INFO_LOG_BUFFER`, `CU_JIT_ERROR_LOG_BUFFER`) under `--verbose`.
   - Negative test suite verifying robust error handling and resource cleanup on missing files, unknown kernel symbols, argument count mismatches, and invalid dump specifications.
+  - Argument type checking: each `--arg` must match its PTX `.param` type (`.f32` → `f32:`, `.s32`/`.u32`/`.b32` → `i32:`, `.u64`/`.b64` pointer → `buf:`). Mismatches must be rejected before launch with the argument number and expected type (stage 21).
 

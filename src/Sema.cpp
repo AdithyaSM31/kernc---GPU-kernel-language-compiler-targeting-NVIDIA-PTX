@@ -485,9 +485,22 @@ Type Sema::checkCallExpr(CallExpr& expr, bool isExprStmt) {
             return expr.resolvedType;
         }
 
+        // Atomics operate on a single int or float. A vector element type used to fall through
+        // as int, so atomic_add on a float4* emitted an integer atom.add.s32 on float data.
+        auto rejectVectorTarget = [&](const std::string& typeName) {
+            diag_.error(expr.args[0]->range.begin, "intrinsic '" + expr.callee + "' does not support '" +
+                        typeName + "' memory operand (atomics need an int or float target)");
+            for (size_t k = 1; k < expr.args.size(); ++k) checkExpr(*expr.args[k]);
+            expr.resolvedType = Type::makeInt();
+            return expr.resolvedType;
+        };
+
         Type pointeeType = Type::makeVoid();
         if (auto* idxExpr = dynamic_cast<IndexExpr*>(expr.args[0].get())) {
             pointeeType = checkIndexExpr(*idxExpr);
+            if (!pointeeType.isVoid() && !pointeeType.isInt() && !pointeeType.isFloat()) {
+                return rejectVectorTarget(pointeeType.toString());
+            }
         } else {
             Type ptrTy = Type::makeVoid();
             if (auto* ident = dynamic_cast<IdentExpr*>(expr.args[0].get())) {
@@ -500,6 +513,9 @@ Type Sema::checkCallExpr(CallExpr& expr, bool isExprStmt) {
                 diag_.error(expr.args[0]->range.begin, "argument 1 ('ptr') of '" + expr.callee +
                             "' must be a pointer or shared array, got '" + ptrTy.toString() + "'");
             } else if (!ptrTy.isVoid()) {
+                if (ptrTy.pointeeKind != Type::Int && ptrTy.pointeeKind != Type::Float) {
+                    return rejectVectorTarget(ptrTy.toString());
+                }
                 pointeeType = (ptrTy.pointeeKind == Type::Float) ? Type::makeFloat() : Type::makeInt();
             }
 
