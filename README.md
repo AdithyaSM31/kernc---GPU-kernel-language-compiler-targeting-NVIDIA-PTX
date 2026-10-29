@@ -35,7 +35,7 @@ What it supports:
 - `.file` / `.loc` source line info with `-lineinfo`
 - diagnostics with `file:line:column` and a caret
 
-The suite has 164 tests, and all of them pass, both in a normal build and under
+The suite has 176 tests, and all of them pass, both in a normal build and under
 UndefinedBehaviorSanitizer.
 
 ---
@@ -257,6 +257,26 @@ For `examples/reduce.kern`, kernc now achieves **36 executable SASS instructions
 (48 instructions including exit NOP bundle alignment), matching `nvcc` (37 instructions, 10 registers)
 with zero `MUFU.RCP` instructions.
 
+#### Device function inlining on `examples/functions.kern`
+
+`ptxas` does not inline device functions emitted into PTX: in `examples/functions.kern` at `-O0` (and before kernc's inliner), all 11 calls across the module remained as `CALL.REL.NOINC` in SASS, including 7 calls inside `use_functions`. `nvcc`'s front end inlines before emitting PTX.
+
+`kernc`'s optimizer (`-O1`) now performs call graph construction (`CallGraph::build`), cycle and recursion detection (`CallGraph::isRecursive`), and inlines small non-recursive device functions at the IR level:
+
+| Metric | kernc (-O0, un-inlined) | kernc (-O1, inlined) | nvcc (-arch=sm_86 -O3) |
+|---|---|---|---|
+| `use_functions` SASS calls | 7 (`in_range` x2, `square`, `store_twice`, `collatz_steps`, `fib`, `is_even`) | 2 (`fib`, `is_even`) | 2 (`fib`, `is_even`) |
+| Cubin total SASS calls | 11 | 6 | 6 |
+| Cubin total SASS instructions | 240 (489 cuobjdump lines) | 184 (377 cuobjdump lines, -23.3%) | 152 (313 cuobjdump lines) |
+| `use_functions` SASS instructions | 91 | 89 | 67 |
+| `use_functions` registers | 24 | 24 | 24 |
+| `use_functions` stack frame | 0 bytes | 0 bytes | 0 bytes |
+
+`kernc` matches `nvcc`'s inlining decisions exactly:
+- `square`, `in_range` (both call sites), `store_twice`, and `collatz_steps` are inlined at the IR level.
+- `fib` (self-recursive) and `is_even`/`is_odd` (mutually recursive) are detected via cycle analysis in the call graph and never inlined.
+- Parameters become direct register moves; pointer parameters bypass redundant `cvta.to.global`; `bool` parameters and returns lose their `CvtPredToS32` / `SetpNe` ABI round-trip; return expressions become moves into continuation blocks; and line info is preserved on every inlined instruction.
+
 ---
 
 ## Design decisions
@@ -374,8 +394,8 @@ intrinsics, calls, and branches, while respecting RAW, WAR, and WAW memory depen
 
 | Suite | Count | What it checks |
 |---|---|---|
-| Unit tests (GoogleTest) | 103 | Lexer 9, parser 15, Sema 34 (accept/reject, type/arity rules, diagnostic locations), IR, passes, scheduling & PTX 45 |
-| GPU end-to-end (Driver API) | 27 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
+| Unit tests (GoogleTest) | 114 | Lexer 9, parser 15, Sema 34 (accept/reject, type/arity rules, diagnostic locations), IR, passes, scheduling & PTX 56 |
+| GPU end-to-end (Driver API) | 28 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
 | Diagnostics | 1 suite, 8 files | `tests/diagnostic/err_*.kern` must fail with the expected message (and location, where given) |
 | ptxas acceptance | 6 | Every file in `examples/` assembles with `ptxas -arch=sm_86` |
 | ptxas regression | 24 | `tests/regress/*.kern` (12 kernels) assemble at both `-O0` and `-O1` |
@@ -392,7 +412,7 @@ The GPU tests cover:
 - the shipped reduction example, for 1 to 2²⁰+3 elements;
 - warp-level tree reduction (`__shfl_down_sync` / `shfl_down_sync` with offsets 16, 8, 4, 2, 1), butterfly exchange (`__shfl_xor_sync` / `shfl_xor_sync`), broadcast (`__shfl_sync` / `shfl_sync`), warp ballot (`__ballot_sync` bool predicate, `ballot_sync` int predicate), active mask (`__activemask` / `activemask`), and shift up (`__shfl_up_sync` / `shfl_up_sync`) for `int` and `float` at `-O0` and `-O1` vs CPU reference;
 - atomic memory operations under heavy contention across 4096 parallel threads (16 blocks of 256 threads) verifying exact global and shared memory results (`atomic_add` int/float, `atomic_sub`, `atomic_min`, `atomic_max`, `atomic_or`, `atomic_and`, `atomic_xor`, `atomic_exch` int/float, and single-winner `atomic_cas`) at `-O0` and `-O1` vs CPU reference;
-- device functions (`examples/functions.kern`), with recursion, mutual recursion, float, bool, pointer and void calls at `-O0` and `-O1`;
+- device functions (`examples/functions.kern`, plus nested multi-level inlining, multi-return branching, and mutual recursion cycles), with float, bool, pointer and void calls at `-O0` and `-O1`;
 - functions and arrays named like kernc's old generated PTX names (`entry`, `L_then_0`,
   `f_retval`, `param0`, `k_buf`, …), which must compile and call the right function;
 - PTX with line info under `CU_JIT_GENERATE_LINE_INFO`;
@@ -455,10 +475,9 @@ Every fix is in the commit history, together with a test that failed before the 
   numbers) is a natural next step.
 - **No CSE or copy propagation in kernc.** For SAXPY ptxas makes up for it, as shown above,
   but kernc's own PTX still recomputes addresses and reloads constants.
-- **No inlining.** ptxas keeps every device-function call as a real `CALL` with the ABI's
-  overhead: in `examples/functions.kern` it inlined none of the 7 functions, not even
-  `square`. nvcc's front end inlines before emitting PTX, so this is front-end work, like
-  strength reduction.
+- **Inlining of recursive or large functions.** Small, non-recursive device functions are
+  inlined at `-O1` (see above). Functions participating in self or mutual recursion and
+  functions exceeding the instruction count threshold remain out-of-line ABI calls.
 - **No unreachable-block removal.** Code after `return` leaves an unreachable `$L_after_ret`
   block in the PTX; ptxas removes it.
 - **No definite-assignment analysis.** Reading an uninitialized variable produces valid PTX

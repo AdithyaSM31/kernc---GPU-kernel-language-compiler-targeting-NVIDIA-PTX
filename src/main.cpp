@@ -118,6 +118,7 @@ int main(int argc, char** argv) {
 
     // 4. Optimizations
     if (optimize) {
+        kernc::Optimizer::runInlining(irModule);
         kernc::Optimizer::runPasses(irModule);
         if (dumpOptIR) {
             std::cout << "// --- Optimized IR ---\n" << irModule.dump();

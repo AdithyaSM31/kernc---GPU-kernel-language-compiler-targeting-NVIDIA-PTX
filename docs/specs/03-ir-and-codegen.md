@@ -221,5 +221,24 @@ The IR is a non-SSA 3-address virtual-register code organized into Basic Blocks 
       - Hoists memory loads early to hide memory latency (200-400 cycles on Ampere), interleaves ALU operations to saturate compute pipelines, and sinks stores to the end of the block.
       - Verified on SASS disassembly via `nvdisasm`: eliminates scoreboard stalls by scheduling all `LDG.E` / `LDG.E.128` instructions concurrently before dependent ALU and stores.
 
-
-
+16. **Inter-Procedural Inlining of Small, Non-Recursive Device Functions**:
+    - **Call Graph & Recursion Analysis**:
+      - `CallGraph::build` scans every function block and maps caller functions to called callee symbols.
+      - `CallGraph::isRecursive` identifies functions participating in directed cycles (self-recursion like `fib` and mutual recursion like `is_even` $\leftrightarrow$ `is_odd`) via BFS reachability from direct callees.
+      - Recursive functions are never inlined, preventing infinite inlining loops.
+    - **Inlining Eligibility**:
+      - `!fn.isKernel`: kernels cannot be inlined into callers.
+      - Non-recursive: `!cg.isRecursive(fn.name)`.
+      - Size threshold: total IR instruction count $\le 64$ instructions.
+      - Shared memory safety: functions declaring local `.shared` arrays (`!fn.sharedVars.empty()`) are preserved out-of-line to avoid multi-call aliasing.
+    - **IR-Level Transformation Mechanics**:
+      - Fresh register allocation (`vregMap`) and basic block label remapping (`labelMap`) ensure zero collision with caller virtual registers and block names.
+      - Basic block splitting: caller block containing `IROp::Call` is split into `headBB` and continuation `tailBB` (`contLabel`).
+      - Inlined body insertion: callee blocks are inserted between `headBB` and `tailBB`.
+      - Parameter moves: callee `IROp::LoadParam` instructions become register `Mov` operations.
+      - ABI conversion elimination:
+        - Bool parameters: caller's `CvtPredToS32` and callee's `SetpNe` against 0 are eliminated; argument predicates move directly into callee predicate registers.
+        - Bool returns: callee's `CvtPredToS32` and caller's `SetpNe` against 0 are eliminated; callee return predicates move directly into caller predicate destinations.
+        - Pointer parameters: 64-bit generic/global addresses are passed directly via `mov.u64`, bypassing redundant `cvta.to.global`.
+      - Continuation threading: callee `StoreRetval` becomes a `Mov` into the caller result register, and callee `Ret` becomes `Bra contLabel`.
+      - Line info preservation: every inlined instruction maintains its original `srcLoc` referencing source lines in the callee definition.

@@ -1,5 +1,6 @@
 #include "kernc/Passes.h"
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <unordered_map>
@@ -879,6 +880,357 @@ bool Optimizer::runPasses(IRModule& mod) {
         }
     }
     return changed;
+}
+
+CallGraph CallGraph::build(const IRModule& mod) {
+    CallGraph cg;
+    std::unordered_set<std::string> knownFuncs;
+    for (const auto& fn : mod.functions) {
+        knownFuncs.insert(fn.name);
+        cg.callersToCallees[fn.name]; // ensure key exists
+    }
+    for (const auto& fn : mod.functions) {
+        for (const auto& bb : fn.blocks) {
+            for (const auto& inst : bb.instructions) {
+                if (inst.op == IROp::Call && knownFuncs.count(inst.symbol)) {
+                    cg.callersToCallees[fn.name].insert(inst.symbol);
+                }
+            }
+        }
+    }
+    return cg;
+}
+
+bool CallGraph::isRecursive(const std::string& funcName) const {
+    auto it = callersToCallees.find(funcName);
+    if (it == callersToCallees.end()) return false;
+
+    // BFS from direct callees of funcName; if funcName is reachable, it participates in a cycle.
+    std::unordered_set<std::string> visited;
+    std::vector<std::string> queue;
+    for (const auto& callee : it->second) {
+        if (callee == funcName) return true; // Direct self-recursion
+        queue.push_back(callee);
+        visited.insert(callee);
+    }
+
+    while (!queue.empty()) {
+        std::string curr = queue.back();
+        queue.pop_back();
+
+        auto cit = callersToCallees.find(curr);
+        if (cit != callersToCallees.end()) {
+            for (const auto& next : cit->second) {
+                if (next == funcName) return true; // Path back to funcName (recursion/cycle)
+                if (visited.insert(next).second) {
+                    queue.push_back(next);
+                }
+            }
+        }
+    }
+    return false;
+}
+
+namespace {
+
+static int functionInstructionCount(const IRFunction& fn) {
+    int count = 0;
+    for (const auto& bb : fn.blocks) {
+        count += static_cast<int>(bb.instructions.size());
+    }
+    return count;
+}
+
+static bool inlineCall(IRFunction& caller, size_t blockIdx, size_t instIdx, const IRFunction& callee) {
+    auto& callerBB = caller.blocks[blockIdx];
+    const auto callInst = callerBB.instructions[instIdx];
+    assert(callInst.op == IROp::Call && callInst.symbol == callee.name);
+
+    // 1. Check if caller has bool return ABI conversion following callInst:
+    //    call abiReg = callee(...)
+    //    ldimm zeroReg = 0
+    //    setp.ne predReg = abiReg, zeroReg
+    bool calleeReturnsBool = callee.returnType.isBool();
+    VReg callerPredDst = 0;
+    size_t extraConsumed = 0;
+    if (calleeReturnsBool && callInst.dst != 0) {
+        if (instIdx + 2 < callerBB.instructions.size()) {
+            const auto& inst1 = callerBB.instructions[instIdx + 1];
+            const auto& inst2 = callerBB.instructions[instIdx + 2];
+            if (inst1.op == IROp::LoadImm && inst1.immInt == 0 &&
+                inst2.op == IROp::SetpNe && inst2.src1 == callInst.dst && inst2.src2 == inst1.dst) {
+                callerPredDst = inst2.dst;
+                extraConsumed = 2;
+            }
+        }
+    }
+
+    // 2. Map callee virtual registers to fresh virtual registers in caller
+    std::unordered_map<VReg, VReg> vregMap;
+    vregMap[0] = 0;
+    for (size_t r = 1; r < callee.regTypes.size(); ++r) {
+        VReg fresh = caller.freshReg(callee.regTypes[r]);
+        vregMap[static_cast<VReg>(r)] = fresh;
+    }
+
+    // 3. Map callee basic block labels to fresh labels in caller
+    std::unordered_map<Label, Label> labelMap;
+    for (const auto& bb : callee.blocks) {
+        std::string hint = callee.name + "_" + (!bb.label.empty() && bb.label.front() == '$' ? bb.label.substr(1) : bb.label);
+        labelMap[bb.label] = caller.freshLabel(hint);
+    }
+    Label contLabel = caller.freshLabel("inlined_cont");
+
+    // 4. Identify parameter mappings and bool argument conversions
+    std::unordered_map<size_t, VReg> calleeParamReg;
+    std::unordered_map<size_t, VReg> calleeBoolParamPredReg;
+    std::unordered_set<size_t> calleeSkippedEntryInsts;
+
+    if (!callee.blocks.empty()) {
+        const auto& entryInsts = callee.blocks[0].instructions;
+        for (size_t p = 0; p < callee.params.size(); ++p) {
+            for (size_t k = 0; k < entryInsts.size(); ++k) {
+                const auto& ci = entryInsts[k];
+                if (ci.op == IROp::LoadParam && ci.paramIndex == static_cast<int>(p)) {
+                    calleeParamReg[p] = ci.dst;
+                    calleeSkippedEntryInsts.insert(k);
+
+                    if (callee.params[p].type.isBool() && k + 2 < entryInsts.size()) {
+                        const auto& zInst = entryInsts[k + 1];
+                        const auto& sInst = entryInsts[k + 2];
+                        if (zInst.op == IROp::LoadImm && zInst.immInt == 0 &&
+                            sInst.op == IROp::SetpNe && sInst.src1 == ci.dst && sInst.src2 == zInst.dst) {
+                            calleeBoolParamPredReg[p] = sInst.dst;
+                            calleeSkippedEntryInsts.insert(k + 1);
+                            calleeSkippedEntryInsts.insert(k + 2);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // Check caller for cvt.pred2i for each bool param
+    std::unordered_map<size_t, VReg> callerOrigPredArg;
+    std::unordered_set<const IRInst*> callerSkippedArgCvts;
+    for (size_t p = 0; p < callee.params.size(); ++p) {
+        if (callee.params[p].type.isBool() && p < callInst.args.size()) {
+            VReg abiArg = callInst.args[p];
+            for (size_t k = 0; k < instIdx; ++k) {
+                const auto& prev = callerBB.instructions[k];
+                if (prev.op == IROp::CvtPredToS32 && prev.dst == abiArg) {
+                    callerOrigPredArg[p] = prev.src1;
+                    callerSkippedArgCvts.insert(&prev);
+                    break;
+                }
+            }
+        }
+    }
+
+    // 5. Generate parameter move instructions
+    std::vector<IRInst> paramMoves;
+    for (size_t p = 0; p < callee.params.size(); ++p) {
+        if (p >= callInst.args.size()) break;
+        VReg argReg = callInst.args[p];
+        if (callee.params[p].type.isBool() && calleeBoolParamPredReg.count(p) && callerOrigPredArg.count(p)) {
+            // Direct predicate copy without ABI roundtrip!
+            VReg calleePred = calleeBoolParamPredReg[p];
+            IRInst movInst{IROp::Mov, vregMap[calleePred], callerOrigPredArg[p], 0, IRType::Pred};
+            movInst.srcLoc = callInst.srcLoc;
+            paramMoves.push_back(movInst);
+        } else if (calleeParamReg.count(p)) {
+            VReg calleeP = calleeParamReg[p];
+            IRType pType = callee.regType(calleeP);
+            IRInst movInst{IROp::Mov, vregMap[calleeP], argReg, 0, pType};
+            movInst.srcLoc = callInst.srcLoc;
+            paramMoves.push_back(movInst);
+
+            if (callee.params[p].type.isBool() && calleeBoolParamPredReg.count(p) && !callerOrigPredArg.count(p)) {
+                VReg zeroR = caller.freshReg(IRType::S32);
+                IRInst zInst{IROp::LoadImm, zeroR, 0, 0, IRType::S32};
+                zInst.immInt = 0;
+                zInst.srcLoc = callInst.srcLoc;
+                paramMoves.push_back(zInst);
+                VReg calleePred = calleeBoolParamPredReg[p];
+                IRInst sInst{IROp::SetpNe, vregMap[calleePred], vregMap[calleeP], zeroR, IRType::S32};
+                sInst.srcLoc = callInst.srcLoc;
+                paramMoves.push_back(sInst);
+            }
+        }
+    }
+
+    // 6. Find bool return cvt.pred2i in callee
+    std::unordered_map<VReg, VReg> calleeRetvalToPred;
+    std::unordered_set<const IRInst*> calleeSkippedRetCvts;
+    if (calleeReturnsBool && callerPredDst != 0) {
+        for (const auto& bb : callee.blocks) {
+            for (size_t k = 0; k + 1 < bb.instructions.size(); ++k) {
+                const auto& cvt = bb.instructions[k];
+                const auto& stRet = bb.instructions[k + 1];
+                if (cvt.op == IROp::CvtPredToS32 && stRet.op == IROp::StoreRetval && stRet.src1 == cvt.dst) {
+                    calleeRetvalToPred[stRet.src1] = cvt.src1;
+                    calleeSkippedRetCvts.insert(&cvt);
+                }
+            }
+        }
+    }
+
+    // 7. Transform callee basic blocks
+    std::vector<BasicBlock> inlinedBlocks;
+    for (size_t b = 0; b < callee.blocks.size(); ++b) {
+        const auto& cbb = callee.blocks[b];
+        BasicBlock newBB;
+        newBB.label = labelMap[cbb.label];
+
+        for (size_t k = 0; k < cbb.instructions.size(); ++k) {
+            const auto& cInst = cbb.instructions[k];
+
+            // Skip parameter load instructions in entry block
+            if (b == 0 && calleeSkippedEntryInsts.count(k)) {
+                continue;
+            }
+
+            // Skip cvt.pred2i before return in callee
+            if (calleeSkippedRetCvts.count(&cInst)) {
+                continue;
+            }
+
+            // Return value store
+            if (cInst.op == IROp::StoreRetval) {
+                if (calleeReturnsBool && callerPredDst != 0 && calleeRetvalToPred.count(cInst.src1)) {
+                    VReg calleePred = calleeRetvalToPred[cInst.src1];
+                    IRInst movInst{IROp::Mov, callerPredDst, vregMap[calleePred], 0, IRType::Pred};
+                    movInst.srcLoc = cInst.srcLoc;
+                    newBB.instructions.push_back(movInst);
+                } else if (callInst.dst != 0) {
+                    IRType retType = caller.regType(callInst.dst);
+                    IRInst movInst{IROp::Mov, callInst.dst, vregMap[cInst.src1], 0, retType};
+                    movInst.srcLoc = cInst.srcLoc;
+                    newBB.instructions.push_back(movInst);
+                }
+                continue;
+            }
+
+            // Return instruction becomes branch to continuation
+            if (cInst.op == IROp::Ret) {
+                IRInst braInst{IROp::Bra, 0, 0, 0, IRType::S32};
+                braInst.trueTarget = contLabel;
+                braInst.srcLoc = cInst.srcLoc;
+                newBB.instructions.push_back(braInst);
+                continue;
+            }
+
+            // General instruction: remap registers and labels
+            IRInst newInst = cInst;
+            if (newInst.dst != 0) newInst.dst = vregMap[newInst.dst];
+            if (newInst.src1 != 0) newInst.src1 = vregMap[newInst.src1];
+            if (newInst.src2 != 0) newInst.src2 = vregMap[newInst.src2];
+            if (newInst.src3 != 0) newInst.src3 = vregMap[newInst.src3];
+            for (auto& d : newInst.dsts) d = vregMap[d];
+            for (auto& a : newInst.args) a = vregMap[a];
+            if (!newInst.trueTarget.empty()) {
+                auto lit = labelMap.find(newInst.trueTarget);
+                if (lit != labelMap.end()) newInst.trueTarget = lit->second;
+            }
+            if (!newInst.falseTarget.empty()) {
+                auto lit = labelMap.find(newInst.falseTarget);
+                if (lit != labelMap.end()) newInst.falseTarget = lit->second;
+            }
+            newBB.instructions.push_back(newInst);
+        }
+        inlinedBlocks.push_back(std::move(newBB));
+    }
+
+    // 8. Split callerBB into head and tail
+    BasicBlock headBB;
+    headBB.label = callerBB.label;
+    for (size_t k = 0; k < instIdx; ++k) {
+        if (!callerSkippedArgCvts.count(&callerBB.instructions[k])) {
+            headBB.instructions.push_back(callerBB.instructions[k]);
+        }
+    }
+    for (const auto& pm : paramMoves) {
+        headBB.instructions.push_back(pm);
+    }
+    if (!inlinedBlocks.empty()) {
+        IRInst braEntry{IROp::Bra, 0, 0, 0, IRType::S32};
+        braEntry.trueTarget = inlinedBlocks[0].label;
+        braEntry.srcLoc = callInst.srcLoc;
+        headBB.instructions.push_back(braEntry);
+    } else {
+        IRInst braCont{IROp::Bra, 0, 0, 0, IRType::S32};
+        braCont.trueTarget = contLabel;
+        braCont.srcLoc = callInst.srcLoc;
+        headBB.instructions.push_back(braCont);
+    }
+
+    BasicBlock tailBB;
+    tailBB.label = contLabel;
+    for (size_t k = instIdx + 1 + extraConsumed; k < callerBB.instructions.size(); ++k) {
+        tailBB.instructions.push_back(callerBB.instructions[k]);
+    }
+
+    // 9. Reconstruct caller's block list
+    std::vector<BasicBlock> newBlocks;
+    for (size_t b = 0; b < caller.blocks.size(); ++b) {
+        if (b == blockIdx) {
+            newBlocks.push_back(std::move(headBB));
+            for (auto& ib : inlinedBlocks) {
+                newBlocks.push_back(std::move(ib));
+            }
+            newBlocks.push_back(std::move(tailBB));
+        } else {
+            newBlocks.push_back(std::move(caller.blocks[b]));
+        }
+    }
+    caller.blocks = std::move(newBlocks);
+    return true;
+}
+
+} // anonymous namespace
+
+bool Optimizer::runInlining(IRModule& mod, int threshold) {
+    auto cg = CallGraph::build(mod);
+
+    std::unordered_map<std::string, const IRFunction*> funcByName;
+    for (const auto& fn : mod.functions) {
+        funcByName[fn.name] = &fn;
+    }
+
+    std::unordered_set<std::string> eligible;
+    for (const auto& fn : mod.functions) {
+        if (!fn.isKernel && !cg.isRecursive(fn.name) &&
+            functionInstructionCount(fn) <= threshold && fn.sharedVars.empty()) {
+            eligible.insert(fn.name);
+        }
+    }
+
+    if (eligible.empty()) return false;
+
+    bool anyInlined = false;
+    for (auto& caller : mod.functions) {
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (size_t b = 0; b < caller.blocks.size(); ++b) {
+                for (size_t i = 0; i < caller.blocks[b].instructions.size(); ++i) {
+                    if (caller.blocks[b].instructions[i].op == IROp::Call) {
+                        std::string calleeName = caller.blocks[b].instructions[i].symbol;
+                        if (eligible.count(calleeName)) {
+                            inlineCall(caller, b, i, *funcByName[calleeName]);
+                            changed = true;
+                            anyInlined = true;
+                            break;
+                        }
+                    }
+                }
+                if (changed) break;
+            }
+        }
+    }
+
+    return anyInlined;
 }
 
 } // namespace kernc

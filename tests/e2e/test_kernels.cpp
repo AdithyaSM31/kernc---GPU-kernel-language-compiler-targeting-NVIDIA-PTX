@@ -90,6 +90,7 @@ static std::string compileSourceToPTX(const std::string& src, bool optimize = tr
     IRGen irgen(diag);
     auto irMod = irgen.emitModule(*prog);
     if (optimize) {
+        Optimizer::runInlining(irMod);
         Optimizer::runPasses(irMod);
     }
 
@@ -771,6 +772,82 @@ TEST_F(KernelE2ETest, DeviceFunctionsExampleMatchesCpu) {
         CHECK_CUDA(cuModuleUnload(mod));
     }
 }
+
+TEST_F(KernelE2ETest, NestedInliningAndEarlyReturnsMatchCpu) {
+    const char* src =
+        "func int min_val(int a, int b) {\n"
+        "    if (a < b) return a;\n"
+        "    return b;\n"
+        "}\n"
+        "func int max_val(int a, int b) {\n"
+        "    if (a > b) return a;\n"
+        "    return b;\n"
+        "}\n"
+        "func int clamp_val(int v, int lo, int hi) {\n"
+        "    return min_val(max_val(v, lo), hi);\n"
+        "}\n"
+        "func int classify(int x, int y) {\n"
+        "    if (x > 0 && y > 0) return 1;\n"
+        "    if (x < 0 && y > 0) return 2;\n"
+        "    if (x < 0 && y < 0) return 3;\n"
+        "    if (x > 0 && y < 0) return 4;\n"
+        "    return 0;\n"
+        "}\n"
+        "func void store_clamped_quadrant(int* out, int i, int x, int y) {\n"
+        "    int c_x = clamp_val(x, -50, 50);\n"
+        "    int c_y = clamp_val(y, -50, 50);\n"
+        "    out[i * 2] = c_x + c_y;\n"
+        "    out[i * 2 + 1] = classify(c_x, c_y);\n"
+        "}\n"
+        "kernel test_nested(int* out, int n) {\n"
+        "    int i = block_idx * block_dim + thread_idx;\n"
+        "    if (i >= n) return;\n"
+        "    int x = (i - 100) * 2;\n"
+        "    int y = (100 - i) * 3;\n"
+        "    store_clamped_quadrant(out, i, x, y);\n"
+        "}\n";
+
+    const int n = 200, blockSize = 64, grid = 4;
+    for (bool optimize : {false, true}) {
+        const char* opt = optimize ? "-O1" : "-O0";
+        std::string ptx = compileSourceToPTX(src, optimize);
+        ASSERT_FALSE(ptx.empty());
+        CUmodule mod = loadPTX(ptx);
+        ASSERT_NE(mod, nullptr);
+        CUfunction func;
+        CHECK_CUDA(cuModuleGetFunction(&func, mod, "test_nested"));
+
+        std::vector<int> h_out(n * 2, -999);
+        CUdeviceptr d_out;
+        CHECK_CUDA(cuMemAlloc(&d_out, h_out.size() * sizeof(int)));
+        CHECK_CUDA(cuMemcpyHtoD(d_out, h_out.data(), h_out.size() * sizeof(int)));
+
+        int nArg = n;
+        void* args[] = { &d_out, &nArg };
+        CHECK_CUDA(cuLaunchKernel(func, grid, 1, 1, blockSize, 1, 1, 0, 0, args, 0));
+        CHECK_CUDA(cuCtxSynchronize());
+        CHECK_CUDA(cuMemcpyDtoH(h_out.data(), d_out, h_out.size() * sizeof(int)));
+
+        for (int i = 0; i < n; ++i) {
+            int x = (i - 100) * 2;
+            int y = (100 - i) * 3;
+            int cx = std::max(-50, std::min(50, x));
+            int cy = std::max(-50, std::min(50, y));
+            int quad = 0;
+            if (cx > 0 && cy > 0) quad = 1;
+            else if (cx < 0 && cy > 0) quad = 2;
+            else if (cx < 0 && cy < 0) quad = 3;
+            else if (cx > 0 && cy < 0) quad = 4;
+
+            ASSERT_EQ(h_out[i * 2], cx + cy) << opt << " sum at i=" << i;
+            ASSERT_EQ(h_out[i * 2 + 1], quad) << opt << " quad at i=" << i;
+        }
+
+        CHECK_CUDA(cuMemFree(d_out));
+        CHECK_CUDA(cuModuleUnload(mod));
+    }
+}
+
 
 // User names that match kernc's old generated PTX names (labels, .param names, call-site
 // temporaries, shared-array symbols) must still compile, and each call must reach the

@@ -8,7 +8,7 @@
 - `tests/unit/lexer_test.cpp`: Keywords, numeric formats (int/hex/float), source locations, comments.
 - `tests/unit/parser_test.cpp`: Precedence climbing, associativity, casts, unary, control flow AST.
 - `tests/unit/sema_test.cpp`: Type checker, scope stack, promotion, diagnostic error triggers.
-- `tests/unit/ir_pass_test.cpp`: Branch threading, constant folding, dead code elimination, PTX emission.
+- `tests/unit/ir_pass_test.cpp`: Branch threading, constant folding, dead code elimination, instruction scheduling, and inter-procedural inlining / call graph analysis.
 
 ### 2. Negative Diagnostic Tests
 - Located in `tests/diagnostic/err_*.kern`.
@@ -38,7 +38,7 @@
     - `clamp`: Branching clamping within $[min, max]$.
     - `relu`: Branching ReLU $\max(0, x)$.
     - `reduce`: Tree reduction using shared memory and barriers.
-    - `functions`: Device functions with recursion, mutual recursion, float/bool/pointer args and returns.
+    - `functions`: Device functions with recursion, mutual recursion, float/bool/pointer args and returns, plus nested multi-level inlining and multiple early returns.
   - Verifies exact or epsilon-bound match against CPU reference implementation.
 
 ### 5. Line-Table Tests (`kernc -lineinfo` → ptxas → `nvdisasm --print-line-info`)

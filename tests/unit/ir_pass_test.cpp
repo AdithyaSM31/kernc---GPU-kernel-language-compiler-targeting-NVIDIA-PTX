@@ -1024,7 +1024,256 @@ TEST(IRPassTest, InstructionSchedulingRespectsMemoryAliases) {
     EXPECT_LT(firstStoreIdx, secondLoadIdx) << "In-place modifications to identical pointer base must preserve RAW/WAR ordering!";
 }
 
+// -------------------------------------------------------------
+// Inlining & Call Graph Tests
+// -------------------------------------------------------------
 
+TEST(IRPassTest, CallGraphRecursionDetection) {
+    std::string src =
+        "func int fib(int n) {\n"
+        "    if (n < 2) return n;\n"
+        "    return fib(n - 1) + fib(n - 2);\n"
+        "}\n"
+        "func bool is_even(int n) {\n"
+        "    if (n == 0) return true;\n"
+        "    return is_odd(n - 1);\n"
+        "}\n"
+        "func bool is_odd(int n) {\n"
+        "    if (n == 0) return false;\n"
+        "    return is_even(n - 1);\n"
+        "}\n"
+        "func int h(int x) { return x * 2; }\n"
+        "func int g(int x) { return h(x) + 1; }\n"
+        "func int f(int x) { return g(x) - 1; }\n"
+        "kernel k(int* out, int x) {\n"
+        "    out[0] = fib(x);\n"
+        "    out[1] = cast<int>(is_even(x));\n"
+        "    out[2] = f(x);\n"
+        "}\n";
+    auto mod = compileModule(src);
+    auto cg = CallGraph::build(mod);
 
+    EXPECT_TRUE(cg.isRecursive("fib"));
+    EXPECT_TRUE(cg.isRecursive("is_even"));
+    EXPECT_TRUE(cg.isRecursive("is_odd"));
 
+    EXPECT_FALSE(cg.isRecursive("f"));
+    EXPECT_FALSE(cg.isRecursive("g"));
+    EXPECT_FALSE(cg.isRecursive("h"));
+    EXPECT_FALSE(cg.isRecursive("k"));
+}
+
+TEST(IRPassTest, InlineSmallNonRecursiveFunction) {
+    std::string src =
+        "func float square(float x) { return x * x; }\n"
+        "kernel k(float* out, float v) {\n"
+        "    out[0] = square(v);\n"
+        "}\n";
+    auto mod = compileModule(src);
+    bool inlined = Optimizer::runInlining(mod);
+    EXPECT_TRUE(inlined);
+
+    const IRFunction* k = findFunction(mod, "k");
+    ASSERT_NE(k, nullptr);
+    EXPECT_EQ(countOps(*k, IROp::Call), 0) << k->dump();
+    EXPECT_GE(countOps(*k, IROp::FMul), 1) << k->dump();
+}
+
+TEST(IRPassTest, NeverInlineRecursiveFunction) {
+    std::string src =
+        "func int fib(int n) {\n"
+        "    if (n < 2) return n;\n"
+        "    return fib(n - 1) + fib(n - 2);\n"
+        "}\n"
+        "func bool is_even(int n) {\n"
+        "    if (n == 0) return true;\n"
+        "    return is_odd(n - 1);\n"
+        "}\n"
+        "func bool is_odd(int n) {\n"
+        "    if (n == 0) return false;\n"
+        "    return is_even(n - 1);\n"
+        "}\n"
+        "kernel k(int* out, int n) {\n"
+        "    out[0] = fib(n);\n"
+        "    out[1] = cast<int>(is_even(n));\n"
+        "}\n";
+    auto mod = compileModule(src);
+    Optimizer::runInlining(mod);
+
+    const IRFunction* k = findFunction(mod, "k");
+    ASSERT_NE(k, nullptr);
+    EXPECT_EQ(countOps(*k, IROp::Call), 2) << k->dump();
+}
+
+TEST(IRPassTest, InliningSizeThresholdExceeded) {
+    std::string src =
+        "func int big(int x) {\n"
+        "    int a = x + 1;\n"
+        "    int b = a + 2;\n"
+        "    int c = b + 3;\n"
+        "    int d = c + 4;\n"
+        "    return d;\n"
+        "}\n"
+        "kernel k(int* out, int x) {\n"
+        "    out[0] = big(x);\n"
+        "}\n";
+    auto mod = compileModule(src);
+    // Set threshold so small (e.g. 2 instructions) that `big` is rejected
+    bool inlined = Optimizer::runInlining(mod, /*threshold=*/2);
+    EXPECT_FALSE(inlined);
+
+    const IRFunction* k = findFunction(mod, "k");
+    ASSERT_NE(k, nullptr);
+    EXPECT_EQ(countOps(*k, IROp::Call), 1) << k->dump();
+}
+
+TEST(IRPassTest, InliningBoolAbiElimination) {
+    std::string src =
+        "func bool in_range(int i, int n) {\n"
+        "    return i >= 0 && i < n;\n"
+        "}\n"
+        "kernel k(int* out, int i, int n) {\n"
+        "    if (!in_range(i, n)) return;\n"
+        "    out[0] = 1;\n"
+        "}\n";
+    auto mod = compileModule(src);
+    bool inlined = Optimizer::runInlining(mod);
+    EXPECT_TRUE(inlined);
+
+    const IRFunction* k = findFunction(mod, "k");
+    ASSERT_NE(k, nullptr);
+    EXPECT_EQ(countOps(*k, IROp::Call), 0) << k->dump();
+    EXPECT_EQ(countOps(*k, IROp::CvtPredToS32), 0) << k->dump();
+}
+
+TEST(IRPassTest, InliningPointerParametersNoCvta) {
+    std::string src =
+        "func void store_twice(float* out, int i, float v) {\n"
+        "    out[i] = v * 2.0;\n"
+        "}\n"
+        "kernel k(float* out, int i, float v) {\n"
+        "    store_twice(out, i, v);\n"
+        "}\n";
+    auto mod = compileModule(src);
+    bool inlined = Optimizer::runInlining(mod);
+    EXPECT_TRUE(inlined);
+
+    const IRFunction* k = findFunction(mod, "k");
+    ASSERT_NE(k, nullptr);
+    EXPECT_EQ(countOps(*k, IROp::Call), 0) << k->dump();
+    // Exactly 1 CvtaGlobal exists: the kernel's own prologue conversion for `out`
+    EXPECT_EQ(countOps(*k, IROp::CvtaGlobal), 1) << k->dump();
+}
+
+TEST(IRPassTest, InliningPreservesLineInfo) {
+    std::string src =
+        "func float square(float x) {\n"  // line 1
+        "    return x * x;\n"            // line 2
+        "}\n"                             // line 3
+        "kernel k(float* out, float v) {\n" // line 4
+        "    out[0] = square(v);\n"        // line 5
+        "}\n";
+    auto mod = compileModule(src);
+    Optimizer::runInlining(mod);
+
+    const IRFunction* k = findFunction(mod, "k");
+    ASSERT_NE(k, nullptr);
+    bool foundLine2 = false;
+    for (const auto& bb : k->blocks) {
+        for (const auto& inst : bb.instructions) {
+            if (inst.op == IROp::FMul && inst.srcLoc.line == 2) {
+                foundLine2 = true;
+            }
+        }
+    }
+    EXPECT_TRUE(foundLine2) << k->dump();
+}
+
+TEST(IRPassTest, CallGraphThreeFunctionMutualRecursion) {
+    std::string src =
+        "func int f1(int n) {\n"
+        "    if (n == 0) return 0;\n"
+        "    return f2(n - 1);\n"
+        "}\n"
+        "func int f2(int n) {\n"
+        "    if (n == 0) return 0;\n"
+        "    return f3(n - 1);\n"
+        "}\n"
+        "func int f3(int n) {\n"
+        "    if (n == 0) return 0;\n"
+        "    return f1(n - 1);\n"
+        "}\n"
+        "kernel k(int* out, int n) {\n"
+        "    out[0] = f1(n);\n"
+        "}\n";
+    auto mod = compileModule(src);
+    auto cg = CallGraph::build(mod);
+
+    EXPECT_TRUE(cg.isRecursive("f1"));
+    EXPECT_TRUE(cg.isRecursive("f2"));
+    EXPECT_TRUE(cg.isRecursive("f3"));
+
+    Optimizer::runInlining(mod);
+    const IRFunction* k = findFunction(mod, "k");
+    ASSERT_NE(k, nullptr);
+    EXPECT_EQ(countOps(*k, IROp::Call), 1) << k->dump();
+}
+
+TEST(IRPassTest, InliningNestedMultiLevelChain) {
+    std::string src =
+        "func int add1(int x) { return x + 1; }\n"
+        "func int add2(int x) { return add1(x) + 1; }\n"
+        "func int add3(int x) { return add2(x) + 1; }\n"
+        "kernel k(int* out, int x) {\n"
+        "    out[0] = add3(x);\n"
+        "}\n";
+    auto mod = compileModule(src);
+    bool inlined = Optimizer::runInlining(mod);
+    EXPECT_TRUE(inlined);
+
+    const IRFunction* k = findFunction(mod, "k");
+    ASSERT_NE(k, nullptr);
+    // All three levels of calls must be completely eliminated
+    EXPECT_EQ(countOps(*k, IROp::Call), 0) << k->dump();
+    EXPECT_GE(countOps(*k, IROp::Add), 3) << k->dump();
+}
+
+TEST(IRPassTest, InliningMultipleEarlyReturns) {
+    std::string src =
+        "func int sign(int x) {\n"
+        "    if (x < 0) return -1;\n"
+        "    if (x == 0) return 0;\n"
+        "    return 1;\n"
+        "}\n"
+        "kernel k(int* out, int x) {\n"
+        "    out[0] = sign(x);\n"
+        "}\n";
+    auto mod = compileModule(src);
+    bool inlined = Optimizer::runInlining(mod);
+    EXPECT_TRUE(inlined);
+
+    const IRFunction* k = findFunction(mod, "k");
+    ASSERT_NE(k, nullptr);
+    EXPECT_EQ(countOps(*k, IROp::Call), 0) << k->dump();
+
+    // Verify PTX emission and assembly succeeds for the multi-return inlined blocks
+    std::string ptx = PTXEmitter().emitModule(mod);
+    EXPECT_NE(ptx.find(".visible .entry k"), std::string::npos);
+}
+
+TEST(IRPassTest, InliningMultipleCallSitesSameCallee) {
+    std::string src =
+        "func int double_val(int x) { return x * 2; }\n"
+        "kernel k(int* out, int a, int b) {\n"
+        "    out[0] = double_val(a) + double_val(b);\n"
+        "}\n";
+    auto mod = compileModule(src);
+    bool inlined = Optimizer::runInlining(mod);
+    EXPECT_TRUE(inlined);
+
+    const IRFunction* k = findFunction(mod, "k");
+    ASSERT_NE(k, nullptr);
+    EXPECT_EQ(countOps(*k, IROp::Call), 0) << k->dump();
+    EXPECT_GE(countOps(*k, IROp::Mul), 2) << k->dump();
+}
 
