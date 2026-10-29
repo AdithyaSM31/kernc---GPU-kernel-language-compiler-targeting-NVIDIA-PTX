@@ -1155,6 +1155,195 @@ bool Optimizer::runCSE(IRFunction& fn) {
     return changedOverall;
 }
 
+bool Optimizer::runCFGCleanup(IRFunction& fn) {
+    if (fn.blocks.empty()) return false;
+    bool changedOverall = false;
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+
+        // Step 1: Remove Unreachable Blocks
+        // Traverse CFG reachability starting from fn.blocks[0]
+        std::unordered_set<std::string> reachable;
+        std::vector<std::string> worklist;
+        reachable.insert(fn.blocks[0].label);
+        worklist.push_back(fn.blocks[0].label);
+
+        std::unordered_map<std::string, const BasicBlock*> blockMap;
+        for (const auto& bb : fn.blocks) {
+            blockMap[bb.label] = &bb;
+        }
+
+        while (!worklist.empty()) {
+            std::string curLabel = worklist.back();
+            worklist.pop_back();
+
+            auto it = blockMap.find(curLabel);
+            if (it == blockMap.end()) continue;
+            const auto& bb = *it->second;
+
+            if (bb.instructions.empty()) {
+                for (size_t idx = 0; idx < fn.blocks.size(); ++idx) {
+                    if (fn.blocks[idx].label == curLabel && idx + 1 < fn.blocks.size()) {
+                        const std::string& nextLabel = fn.blocks[idx + 1].label;
+                        if (reachable.insert(nextLabel).second) {
+                            worklist.push_back(nextLabel);
+                        }
+                        break;
+                    }
+                }
+            } else {
+                const auto& last = bb.instructions.back();
+                if (last.op == IROp::Ret) {
+                    // No successors
+                } else if (last.op == IROp::Bra) {
+                    if (!last.trueTarget.empty() && reachable.insert(last.trueTarget).second) {
+                        worklist.push_back(last.trueTarget);
+                    }
+                } else if (last.op == IROp::BraCond) {
+                    if (!last.trueTarget.empty() && reachable.insert(last.trueTarget).second) {
+                        worklist.push_back(last.trueTarget);
+                    }
+                    if (!last.falseTarget.empty() && reachable.insert(last.falseTarget).second) {
+                        worklist.push_back(last.falseTarget);
+                    }
+                } else {
+                    for (size_t idx = 0; idx < fn.blocks.size(); ++idx) {
+                        if (fn.blocks[idx].label == curLabel && idx + 1 < fn.blocks.size()) {
+                            const std::string& nextLabel = fn.blocks[idx + 1].label;
+                            if (reachable.insert(nextLabel).second) {
+                                worklist.push_back(nextLabel);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Delete unreachable blocks
+        for (auto it = fn.blocks.begin(); it != fn.blocks.end(); ) {
+            if (it != fn.blocks.begin() && !reachable.count(it->label)) {
+                it = fn.blocks.erase(it);
+                changed = true;
+                changedOverall = true;
+            } else {
+                ++it;
+            }
+        }
+        if (changed) continue;
+
+        // Step 2: Fold unconditional Bra targeting the immediate next block in layout
+        for (size_t i = 0; i + 1 < fn.blocks.size(); ++i) {
+            auto& bb = fn.blocks[i];
+            const auto& nextBb = fn.blocks[i + 1];
+            if (!bb.instructions.empty()) {
+                if (bb.instructions.back().op == IROp::Bra &&
+                    bb.instructions.back().trueTarget == nextBb.label) {
+                    bb.instructions.pop_back();
+                    changed = true;
+                    changedOverall = true;
+                    break;
+                }
+            }
+        }
+        if (changed) continue;
+
+        // Step 3: Fold Jump Trampolines (blocks that contain only `bra target`)
+        for (size_t i = 1; i < fn.blocks.size(); ++i) {
+            const auto& bb = fn.blocks[i];
+            if (bb.instructions.size() == 1 && bb.instructions[0].op == IROp::Bra) {
+                const std::string& target = bb.instructions[0].trueTarget;
+                if (!target.empty() && target != bb.label) {
+                    for (auto& other : fn.blocks) {
+                        for (auto& inst : other.instructions) {
+                            if (inst.op == IROp::Bra && inst.trueTarget == bb.label) {
+                                inst.trueTarget = target;
+                                changed = true;
+                                changedOverall = true;
+                            } else if (inst.op == IROp::BraCond) {
+                                if (inst.trueTarget == bb.label) {
+                                    inst.trueTarget = target;
+                                    changed = true;
+                                    changedOverall = true;
+                                }
+                                if (inst.falseTarget == bb.label) {
+                                    inst.falseTarget = target;
+                                    changed = true;
+                                    changedOverall = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (changed) continue;
+
+        // Step 4: Merge Single-Predecessor Blocks
+        std::unordered_map<std::string, std::vector<std::string>> preds;
+        for (size_t i = 0; i < fn.blocks.size(); ++i) {
+            const auto& bb = fn.blocks[i];
+            if (bb.instructions.empty()) {
+                if (i + 1 < fn.blocks.size()) {
+                    preds[fn.blocks[i + 1].label].push_back(bb.label);
+                }
+            } else {
+                const auto& last = bb.instructions.back();
+                if (last.op == IROp::Ret) {
+                    // No successors
+                } else if (last.op == IROp::Bra) {
+                    preds[last.trueTarget].push_back(bb.label);
+                } else if (last.op == IROp::BraCond) {
+                    preds[last.trueTarget].push_back(bb.label);
+                    preds[last.falseTarget].push_back(bb.label);
+                } else {
+                    if (i + 1 < fn.blocks.size()) {
+                        preds[fn.blocks[i + 1].label].push_back(bb.label);
+                    }
+                }
+            }
+        }
+
+        for (size_t i = 0; i + 1 < fn.blocks.size(); ++i) {
+            auto& bbA = fn.blocks[i];
+            const auto& bbB = fn.blocks[i + 1];
+
+            bool aOnlyGoesToB = false;
+            if (bbA.instructions.empty()) {
+                aOnlyGoesToB = true;
+            } else {
+                const auto& last = bbA.instructions.back();
+                if (last.op == IROp::Bra && last.trueTarget == bbB.label) {
+                    aOnlyGoesToB = true;
+                } else if (last.op != IROp::Ret && last.op != IROp::Bra && last.op != IROp::BraCond) {
+                    aOnlyGoesToB = true;
+                }
+            }
+
+            if (aOnlyGoesToB) {
+                auto pIt = preds.find(bbB.label);
+                if (pIt != preds.end() && pIt->second.size() == 1 && pIt->second[0] == bbA.label) {
+                    if (!bbA.instructions.empty() && bbA.instructions.back().op == IROp::Bra &&
+                        bbA.instructions.back().trueTarget == bbB.label) {
+                        bbA.instructions.pop_back();
+                    }
+                    bbA.instructions.insert(bbA.instructions.end(),
+                                           bbB.instructions.begin(),
+                                           bbB.instructions.end());
+                    fn.blocks.erase(fn.blocks.begin() + i + 1);
+                    changed = true;
+                    changedOverall = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    return changedOverall;
+}
+
 bool Optimizer::runInstructionScheduling(IRFunction& fn) {
     bool changedOverall = false;
     auto sharedObjects = computeSharedObjects(fn, computePointerBases(fn));
@@ -1200,7 +1389,8 @@ bool Optimizer::runPasses(IRFunction& fn) {
         bool cfChanged = runConstantFolding(fn);
         bool cseChanged = runCSE(fn);
         bool dceChanged = runDeadCodeElimination(fn);
-        if (cfChanged || cseChanged || dceChanged) {
+        bool cfgChanged = runCFGCleanup(fn);
+        if (cfChanged || cseChanged || dceChanged || cfgChanged) {
             changed = true;
         } else {
             break;

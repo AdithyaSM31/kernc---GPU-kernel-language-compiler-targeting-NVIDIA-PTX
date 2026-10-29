@@ -264,3 +264,18 @@ The IR is a non-SSA 3-address virtual-register code organized into Basic Blocks 
       - Source registers in subsequent instructions are rewritten to their root registers.
       - Redundant calculations into the same destination register (`dst == availReg`) and self-moves (`Mov dst, dst`) are eliminated immediately.
       - Dead Code Elimination removes all intermediate `Mov` instructions whose definitions have zero remaining uses.
+
+18. **Control Flow Graph (CFG) Cleanup & Branch Optimization**:
+    - **Reachability Analysis (Unreachable Block Elimination)**:
+      - Traverses the function's CFG via worklist graph traversal starting from entry block `fn.blocks[0]`.
+      - Identifies and prunes dead basic blocks created after unconditional returns (e.g., `$L_after_ret_N`) and disconnected subgraphs (such as dead loops or unreachable mutual branch cycles).
+    - **Physical Fallthrough Branch Elimination**:
+      - Inspects basic blocks ending with an unconditional branch `IROp::Bra`.
+      - If the branch target is identical to the label of the immediate physically subsequent basic block in module layout (`trueTarget == nextBb.label`), the branch instruction is eliminated, enabling natural zero-overhead physical fallthrough in emitted PTX.
+    - **Jump Trampoline Redirection**:
+      - Identifies forwarding blocks consisting solely of an unconditional jump (`bra target`).
+      - Rewrites branch targets across all predecessor branch instructions (`Bra`, `BraCond`) to jump directly to the ultimate target, eliminating unnecessary control-flow hops.
+    - **Single-Predecessor Block Merging**:
+      - Identifies adjacent basic blocks $A$ and $B$ where block $A$ unconditionally flows into $B$ and $B$ has an in-degree of exactly 1 ($\mathrm{preds}(B) = \{A\}$).
+      - Concatenates the instructions of $B$ into $A$ and deletes block $B$.
+      - By coalescing fragmented blocks into larger straight-line basic blocks, CFG cleanup directly expands the optimization scope for subsequent iterations of Constant Folding and Local Common Subexpression Elimination (CSE).

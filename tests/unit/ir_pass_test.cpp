@@ -1414,3 +1414,122 @@ TEST(IRPassTest, CSE_CommutativeOperandsFlipped) {
     EXPECT_EQ(countOps(fn, IROp::Mov), 1) << fn.dump();
 }
 
+TEST(IRPassTest, CFG_RemovesUnreachableBlocksAfterReturn) {
+    std::string src =
+        "func int sign(int x) {\n"
+        "    if (x < 0) return -1;\n"
+        "    return 1;\n"
+        "}\n";
+    auto mod = compileModule(src);
+    const IRFunction* f = findFunction(mod, "sign");
+    ASSERT_NE(f, nullptr);
+    IRFunction fn = *f;
+
+    // In unoptimized IR, $L_after_ret blocks exist
+    bool hasAfterRet = false;
+    for (const auto& bb : fn.blocks) {
+        if (bb.label.find("after_ret") != std::string::npos) {
+            hasAfterRet = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(hasAfterRet);
+
+    Optimizer::runCFGCleanup(fn);
+
+    // After cleanup, all $L_after_ret blocks must be completely pruned
+    for (const auto& bb : fn.blocks) {
+        EXPECT_EQ(bb.label.find("after_ret"), std::string::npos)
+            << "Found unreachable block: " << bb.label << "\n" << fn.dump();
+    }
+}
+
+TEST(IRPassTest, CFG_FoldsBraToImmediateNextBlock) {
+    std::string src =
+        "kernel k(int* out, int x) {\n"
+        "    if (x > 0) {\n"
+        "        out[0] = x;\n"
+        "    }\n"
+        "}\n";
+    auto fn = compileToIR(src);
+    int braBefore = countOps(fn, IROp::Bra);
+    EXPECT_GE(braBefore, 1);
+
+    Optimizer::runCFGCleanup(fn);
+
+    // The unconditional branch to the immediate physical fallthrough block is eliminated
+    int braAfter = countOps(fn, IROp::Bra);
+    EXPECT_LT(braAfter, braBefore);
+}
+
+TEST(IRPassTest, CFG_MergesSinglePredecessorBlocks) {
+    IRFunction fn;
+    fn.addBlock("$entry");
+    VReg r0 = fn.freshReg(IRType::S32);
+    fn.emit(IRInst{IROp::LoadImm, r0, 0, 0, IRType::S32});
+    IRInst braNext{IROp::Bra, 0, 0, 0, IRType::S32};
+    braNext.trueTarget = "$L_body";
+    fn.emit(braNext);
+
+    fn.addBlock("$L_body");
+    VReg r1 = fn.freshReg(IRType::S32);
+    fn.emit(IRInst{IROp::Add, r1, r0, r0, IRType::S32});
+    fn.emit(IRInst{IROp::Ret, 0, 0, 0, IRType::S32});
+
+    EXPECT_EQ(fn.blocks.size(), 2);
+    bool changed = Optimizer::runCFGCleanup(fn);
+    EXPECT_TRUE(changed);
+
+    // $L_body should be merged into $entry, resulting in exactly 1 block
+    EXPECT_EQ(fn.blocks.size(), 1) << fn.dump();
+    EXPECT_EQ(countOps(fn, IROp::Bra), 0) << fn.dump();
+    EXPECT_EQ(countOps(fn, IROp::Add), 1) << fn.dump();
+}
+
+TEST(IRPassTest, CFG_DoesNotMergeWhenMultiplePredecessors) {
+    std::string src =
+        "kernel k(int* out, int x) {\n"
+        "    if (x > 0) {\n"
+        "        out[0] = 1;\n"
+        "    } else {\n"
+        "        out[0] = 2;\n"
+        "    }\n"
+        "}\n";
+    auto fn = compileToIR(src);
+    Optimizer::runCFGCleanup(fn);
+    // Ensure join block is not merged illegally
+    bool hasEnd = false;
+    for (const auto& bb : fn.blocks) {
+        if (bb.label.find("if_end") != std::string::npos) {
+            hasEnd = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(hasEnd) << fn.dump();
+}
+
+TEST(IRPassTest, CFG_UnreachableCycleEliminated) {
+    IRFunction fn;
+    fn.addBlock("$entry");
+    fn.emit(IRInst{IROp::Ret, 0, 0, 0, IRType::S32});
+
+    // Create an unreachable cycle: $dead1 <-> $dead2
+    fn.addBlock("$dead1");
+    IRInst bra2{IROp::Bra, 0, 0, 0, IRType::S32};
+    bra2.trueTarget = "$dead2";
+    fn.emit(bra2);
+
+    fn.addBlock("$dead2");
+    IRInst bra1{IROp::Bra, 0, 0, 0, IRType::S32};
+    bra1.trueTarget = "$dead1";
+    fn.emit(bra1);
+
+    EXPECT_EQ(fn.blocks.size(), 3);
+    bool changed = Optimizer::runCFGCleanup(fn);
+    EXPECT_TRUE(changed);
+
+    // Only $entry must survive; $dead1 and $dead2 must be pruned
+    EXPECT_EQ(fn.blocks.size(), 1) << fn.dump();
+    EXPECT_EQ(fn.blocks[0].label, "$entry");
+}
+

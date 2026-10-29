@@ -21,6 +21,7 @@ public:
 
     static bool runInlining(IRModule& mod, int threshold = 64);
 
+    static bool runCFGCleanup(IRFunction& fn);
     static bool runConstantFolding(IRFunction& fn);
     static bool runCSE(IRFunction& fn);
     static bool runDeadCodeElimination(IRFunction& fn);

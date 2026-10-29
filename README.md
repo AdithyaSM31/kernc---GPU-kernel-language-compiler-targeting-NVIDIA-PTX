@@ -162,7 +162,7 @@ Rules that matter for correctness:
 | Parser | `Parser.cpp`, `AST.h` | Recursive descent with precedence climbing for binary operators |
 | Sema | `Sema.cpp`, `Sema.h` | Nested scopes, type rules, literal range, shared-memory limit |
 | IRGen | `IRGen.cpp`, `IR.h` | Non-SSA three-address IR with typed virtual registers and basic blocks |
-| Optimizer | `Passes.cpp` | Constant folding (with PTX semantics) and dead-code elimination, repeated until nothing changes (at most 10 rounds) |
+| Optimizer | `Passes.cpp` | Function inlining, constant folding (PTX semantics), local CSE & copy propagation, dead-code elimination, and CFG cleanup repeated to convergence (up to 10 rounds), followed by latency-aware instruction scheduling |
 | PTXEmitter | `PTXEmitter.cpp` | Register declarations, `.param`/`.global`/`.shared` access, line info |
 | Driver | `main.cpp` | CLI; diagnostics print as `file:line:col: error: ...` with the source line and a caret |
 
@@ -388,13 +388,17 @@ are sunk to the end. The scheduler enforces strict fencing across `barrier()`, a
 intrinsics, calls, and branches, while respecting RAW, WAR, and WAW memory dependencies. SASS disassembly via
 `nvdisasm` verifies that unrolled loops emit pipelined `LDG.E` / `LDG.E.128` instructions with zero loop branch instructions.
 
+**13. CFG Cleanup & Branch Optimization.**
+Emitted IR frequently contains dead basic blocks after return instructions (`$L_after_ret_N`), jump trampolines (single-instruction blocks consisting solely of `bra target`), and branches targeting the immediate next physical block in program layout.
+`Optimizer::runCFGCleanup` performs reachability analysis starting from the function entry block (`fn.blocks[0]`) via graph traversal, safely pruning all unreachable blocks and disconnected subgraphs (such as dead loops or unreachable mutual branch cycles). It then folds unconditional branches (`bra`) targeting the immediate next physical block into direct fallthrough, redirects jump trampolines across all predecessor branch sites, and merges single-predecessor single-successor adjacent blocks ($\mathrm{preds}(B) = \{A\}$). Coalescing these fragmented blocks into larger basic blocks significantly expands the instruction window for subsequent passes of Constant Folding and Local Common Subexpression Elimination (CSE).
+
 ---
 
 ## Testing
 
 | Suite | Count | What it checks |
 |---|---|---|
-| Unit tests (GoogleTest) | 121 | Lexer 9, parser 15, Sema 34 (accept/reject, type/arity rules, diagnostic locations), IR, passes, scheduling, inlining & CSE 63 |
+| Unit tests (GoogleTest) | 126 | Lexer 9, parser 15, Sema 34 (accept/reject, type/arity rules, diagnostic locations), IR, passes, scheduling, inlining, CSE & CFG cleanup 68 |
 | GPU end-to-end (Driver API) | 29 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
 | Diagnostics | 1 suite, 8 files | `tests/diagnostic/err_*.kern` must fail with the expected message (and location, where given) |
 | ptxas acceptance | 6 | Every file in `examples/` assembles with `ptxas -arch=sm_86` |
@@ -438,6 +442,7 @@ Two techniques do most of the work:
   - `shfl.sync.up` instead of `shfl.sync.down` fails the warp tree reduction test;
   - inverting list scheduling priority (stores high, loads low) fails the load-hoisting latency check (`lastLoadIdx < firstStoreIdx`, on two different shared arrays);
   - disabling load invalidation on stores in CSE fails both the aliased buffer GPU differential test (output 19 vs expected 36) and the memory aliasing unit test;
+  - disabling fallthrough branch folding in CFG cleanup fails the branch elimination unit test (`braAfter < braBefore`);
   - removing `bar.sync` fails the block-reverse test, first at thread 64, the first thread of
     the third warp, which read data before its partner warp had written it;
   - removing statement locations fails all six line-table checks;
