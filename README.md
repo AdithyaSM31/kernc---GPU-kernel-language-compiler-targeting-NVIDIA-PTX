@@ -31,11 +31,11 @@ What it supports:
 - short-circuit `&&` / `||`, in conditions and as values
 - explicit `cast<T>()` between `int`, `float` and `bool`
 - bitwise operators (`&`, `|`, `^`, `~`, `<<`, `>>`) on `int` with ISO C precedence
-- constant folding, algebraic simplification, and dead-code elimination (with dead vector load pruning)
+- constant folding, algebraic simplification, local Common Subexpression Elimination (CSE), copy propagation, and dead-code elimination (with dead vector load pruning)
 - `.file` / `.loc` source line info with `-lineinfo`
 - diagnostics with `file:line:column` and a caret
 
-The suite has 176 tests, and all of them pass, both in a normal build and under
+The suite has 184 tests, and all of them pass, both in a normal build and under
 UndefinedBehaviorSanitizer.
 
 ---
@@ -394,8 +394,8 @@ intrinsics, calls, and branches, while respecting RAW, WAR, and WAW memory depen
 
 | Suite | Count | What it checks |
 |---|---|---|
-| Unit tests (GoogleTest) | 114 | Lexer 9, parser 15, Sema 34 (accept/reject, type/arity rules, diagnostic locations), IR, passes, scheduling & PTX 56 |
-| GPU end-to-end (Driver API) | 28 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
+| Unit tests (GoogleTest) | 121 | Lexer 9, parser 15, Sema 34 (accept/reject, type/arity rules, diagnostic locations), IR, passes, scheduling, inlining & CSE 63 |
+| GPU end-to-end (Driver API) | 29 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
 | Diagnostics | 1 suite, 8 files | `tests/diagnostic/err_*.kern` must fail with the expected message (and location, where given) |
 | ptxas acceptance | 6 | Every file in `examples/` assembles with `ptxas -arch=sm_86` |
 | ptxas regression | 24 | `tests/regress/*.kern` (12 kernels) assemble at both `-O0` and `-O1` |
@@ -420,6 +420,7 @@ The GPU tests cover:
   constants;
 - a differential test where `-O0` (GPU `div.s32`/`rem.s32`) and `-O1` (strength-reduced shifts/masks)
   must give bit-identical results across positive, negative, zero, and `INT_MIN` values for `/ 2^k` and `% 2^k`;
+- a differential test where `-O0` and `-O1` must give bit-identical results on redundant address calculations, duplicate loads, commutative expressions, and aliasing buffers where a store clobbers subsequent reads (`KernelE2ETest.CSEMatchesUnoptimizedGPUAndCpu`);
 - loop unrolling and latency-hiding instruction scheduling across a 5-point stencil filter, 8-element dot-product reduction, and pipelined multi-stream load/ALU/store sequences at `-O0` and `-O1` vs CPU reference;
 - the scheduler keeping a store before a load when memory may alias: two kernel pointer
   parameters (or two device-function parameters) given the same buffer, and one thread
@@ -436,6 +437,7 @@ Two techniques do most of the work:
   - `setp.ne` instead of `setp.neu` fails the NaN case;
   - `shfl.sync.up` instead of `shfl.sync.down` fails the warp tree reduction test;
   - inverting list scheduling priority (stores high, loads low) fails the load-hoisting latency check (`lastLoadIdx < firstStoreIdx`, on two different shared arrays);
+  - disabling load invalidation on stores in CSE fails both the aliased buffer GPU differential test (output 19 vs expected 36) and the memory aliasing unit test;
   - removing `bar.sync` fails the block-reverse test, first at thread 64, the first thread of
     the third warp, which read data before its partner warp had written it;
   - removing statement locations fails all six line-table checks;

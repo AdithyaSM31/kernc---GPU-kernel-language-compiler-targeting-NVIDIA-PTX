@@ -22,6 +22,7 @@ public:
     static bool runInlining(IRModule& mod, int threshold = 64);
 
     static bool runConstantFolding(IRFunction& fn);
+    static bool runCSE(IRFunction& fn);
     static bool runDeadCodeElimination(IRFunction& fn);
     static bool runInstructionScheduling(IRFunction& fn);
 };

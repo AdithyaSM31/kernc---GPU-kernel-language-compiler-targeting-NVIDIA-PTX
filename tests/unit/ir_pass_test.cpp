@@ -1277,3 +1277,140 @@ TEST(IRPassTest, InliningMultipleCallSitesSameCallee) {
     EXPECT_GE(countOps(*k, IROp::Mul), 2) << k->dump();
 }
 
+TEST(IRPassTest, CSE_EliminatesDuplicateAddressCalculation) {
+    std::string src =
+        "kernel k(int* out, int* a, int i) {\n"
+        "    out[0] = a[i] + a[i];\n"
+        "}\n";
+    auto fn = compileToIR(src);
+    Optimizer::runPasses(fn);
+
+    // a[i] was referenced twice in the same expression.
+    // Address computation (LoadImm 4, MulWide, AddS64) and Load must be eliminated down to 1.
+    EXPECT_EQ(countOps(fn, IROp::MulWide), 1) << fn.dump();
+    EXPECT_EQ(countOps(fn, IROp::AddS64), 1) << fn.dump();
+    EXPECT_EQ(countOps(fn, IROp::Load), 1) << fn.dump();
+}
+
+TEST(IRPassTest, CSE_NeverCSELoadsAcrossStoreToGlobalMemory) {
+    // Correctness Rule 2: global pointers may alias!
+    std::string src =
+        "kernel k(int* out, int* a, int* b, int i) {\n"
+        "    int v1 = a[i];\n"
+        "    b[i] = 42;\n"
+        "    int v2 = a[i];\n"
+        "    out[0] = v1 + v2;\n"
+        "}\n";
+    auto fn = compileToIR(src);
+    Optimizer::runPasses(fn);
+
+    // Because b and a may alias (a == b), the store b[i]=42 must kill available loads.
+    // Therefore, exactly 2 loads from a[i] must be preserved!
+    EXPECT_GE(countOps(fn, IROp::Load), 2) << fn.dump();
+}
+
+TEST(IRPassTest, CSE_NeverCSELoadsAcrossStoreToSameSharedArray) {
+    std::string src =
+        "kernel k(int* out, int i) {\n"
+        "    shared int s[64];\n"
+        "    int v1 = s[i];\n"
+        "    s[i] = 42;\n"
+        "    int v2 = s[i];\n"
+        "    out[0] = v1 + v2;\n"
+        "}\n";
+    auto fn = compileToIR(src);
+    Optimizer::runPasses(fn);
+
+    // Store to s[i] must kill load from s[i]
+    EXPECT_GE(countOps(fn, IROp::Load), 2) << fn.dump();
+}
+
+TEST(IRPassTest, CSE_PreservesLoadsAcrossStoreToProvablyDisjointSharedArray) {
+    std::string src =
+        "kernel k(int* out, int i) {\n"
+        "    shared int s1[64];\n"
+        "    shared int s2[64];\n"
+        "    int v1 = s1[i];\n"
+        "    s2[i] = 42;\n"
+        "    int v2 = s1[i];\n"
+        "    out[0] = v1 + v2;\n"
+        "}\n";
+    auto fn = compileToIR(src);
+    Optimizer::runPasses(fn);
+
+    // Store to s2 cannot alias s1 (different shared symbols are provably disjoint).
+    // The load from s1[i] must be CSE'd so only 1 load from s1 occurs!
+    EXPECT_EQ(countOps(fn, IROp::Load), 1) << fn.dump();
+}
+
+TEST(IRPassTest, CSE_NeverCSELoadsAcrossBarrier) {
+    std::string src =
+        "kernel k(int* out, int* a, int i) {\n"
+        "    int v1 = a[i];\n"
+        "    barrier();\n"
+        "    int v2 = a[i];\n"
+        "    out[0] = v1 + v2;\n"
+        "}\n";
+    auto fn = compileToIR(src);
+    Optimizer::runPasses(fn);
+
+    // barrier() synchronizes all threads; another thread may have written to a[i].
+    // Loads across barrier() must NEVER be CSE'd!
+    EXPECT_GE(countOps(fn, IROp::Load), 2) << fn.dump();
+}
+
+TEST(IRPassTest, CSE_RegisterRedefinitionKillsAvailableExpression) {
+    // Non-SSA verification: redefinition of r0 must invalidate Add(r0, r1)
+    IRFunction fn;
+    fn.addBlock("$entry");
+    VReg r0 = fn.freshReg(IRType::S32);
+    VReg r1 = fn.freshReg(IRType::S32);
+    VReg r2 = fn.freshReg(IRType::S32);
+    VReg r3 = fn.freshReg(IRType::S32);
+    VReg r4 = fn.freshReg(IRType::S32);
+
+    fn.emit(IRInst{IROp::LoadImm, r0, 0, 0, IRType::S32});
+    fn.blocks.back().instructions.back().immInt = 10;
+    fn.emit(IRInst{IROp::LoadImm, r1, 0, 0, IRType::S32});
+    fn.blocks.back().instructions.back().immInt = 20;
+
+    // r2 = r0 + r1  (10 + 20)
+    fn.emit(IRInst{IROp::Add, r2, r0, r1, IRType::S32});
+
+    // Redefine r0: r0 = 30
+    fn.emit(IRInst{IROp::LoadImm, r0, 0, 0, IRType::S32});
+    fn.blocks.back().instructions.back().immInt = 30;
+
+    // r3 = r0 + r1  (30 + 20 -> must NOT be replaced by r2!)
+    fn.emit(IRInst{IROp::Add, r3, r0, r1, IRType::S32});
+
+    // r4 = r0 + r1  (30 + 20 -> SHOULD be replaced by Mov r3!)
+    fn.emit(IRInst{IROp::Add, r4, r0, r1, IRType::S32});
+
+    Optimizer::runCSE(fn);
+
+    // Exactly 2 Add operations must remain (r2 = 10+20, and r3 = 30+20).
+    // r4 was CSE'd into Mov r3.
+    EXPECT_EQ(countOps(fn, IROp::Add), 2) << fn.dump();
+    EXPECT_EQ(countOps(fn, IROp::Mov), 1) << fn.dump();
+}
+
+TEST(IRPassTest, CSE_CommutativeOperandsFlipped) {
+    IRFunction fn;
+    fn.addBlock("$entry");
+    VReg r0 = fn.freshReg(IRType::S32);
+    VReg r1 = fn.freshReg(IRType::S32);
+    VReg r2 = fn.freshReg(IRType::S32);
+    VReg r3 = fn.freshReg(IRType::S32);
+
+    // r2 = r0 + r1
+    fn.emit(IRInst{IROp::Add, r2, r0, r1, IRType::S32});
+    // r3 = r1 + r0 (operands flipped, commutative)
+    fn.emit(IRInst{IROp::Add, r3, r1, r0, IRType::S32});
+
+    bool changed = Optimizer::runCSE(fn);
+    EXPECT_TRUE(changed);
+    EXPECT_EQ(countOps(fn, IROp::Add), 1) << fn.dump();
+    EXPECT_EQ(countOps(fn, IROp::Mov), 1) << fn.dump();
+}
+

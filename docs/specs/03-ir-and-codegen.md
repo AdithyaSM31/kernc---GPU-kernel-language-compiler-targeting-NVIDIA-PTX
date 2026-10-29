@@ -242,3 +242,25 @@ The IR is a non-SSA 3-address virtual-register code organized into Basic Blocks 
         - Pointer parameters: 64-bit generic/global addresses are passed directly via `mov.u64`, bypassing redundant `cvta.to.global`.
       - Continuation threading: callee `StoreRetval` becomes a `Mov` into the caller result register, and callee `Ret` becomes `Bra contLabel`.
       - Line info preservation: every inlined instruction maintains its original `srcLoc` referencing source lines in the callee definition.
+
+17. **Local Common Subexpression Elimination (CSE) & Copy Propagation**:
+    - **Local Value Numbering (LVN) Architecture**:
+      - `Optimizer::runCSE` runs per basic block within the iterative optimization loop alongside constant folding and dead code elimination until convergence.
+      - Maintains an available expressions table (`availExprs`) and a copy-propagation map (`copyMap`).
+      - Identifies pure arithmetic operations, constant loading (`LoadImm`), special register reads (`ReadSReg`), address computations (`MulWide`, `AddS64`, `CvtaGlobal`, `SharedAddr`), parameter loads (`LoadParam`), and memory loads (`Load`).
+      - Commutative operation canonicalization: for commutative operations (`Add`, `Mul`, `And`, `Or`, `Xor`, `FAdd`, `FMul`, `AddS64`, `MulWide`, `SetpEq`, `SetpNe`, `SetpFEq`, `SetpFNe`, `XorPred`), operands are normalized such that $src_1 \le src_2$.
+    - **Non-SSA Definition Invalidation (Kill Semantics)**:
+      - The IR is non-SSA three-address code where virtual registers can be reassigned.
+      - When an instruction defines register $r_{dst}$, any available expression containing $r_{dst}$ as an operand is killed (since its operand value changed).
+      - Any expression whose result was stored in $r_{dst}$ is killed (since $r_{dst}$ no longer holds that value).
+      - All copy mappings with $r_{dst}$ as key or value are invalidated.
+      - Self-referencing instructions ($r_{dst} = op(r_{dst}, \dots)$) are never inserted into available expressions.
+    - **Memory Aliasing and Fence Invalidation (Correctness Rule 2)**:
+      - Global memory stores (`Store`, `StoreV2`, `StoreV4` with `AddrSpace::Global`) invalidate all global load expressions.
+      - Shared memory stores invalidate loads from the same shared array symbol or unknown shared arrays, while provably disjoint shared arrays remain available.
+      - Memory synchronization barriers (`bar.sync`), atomics (`Atomic*`), warp intrinsics (`Shfl*`, `VoteBallot`, `Activemask`), and function calls (`Call`) act as complete memory fences, invalidating all available memory loads.
+    - **Copy Propagation & DCE Synergy**:
+      - Available subexpressions are rewritten as `Mov dst, availReg` and recorded in `copyMap`.
+      - Source registers in subsequent instructions are rewritten to their root registers.
+      - Redundant calculations into the same destination register (`dst == availReg`) and self-moves (`Mov dst, dst`) are eliminated immediately.
+      - Dead Code Elimination removes all intermediate `Mov` instructions whose definitions have zero remaining uses.

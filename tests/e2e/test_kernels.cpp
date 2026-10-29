@@ -2452,6 +2452,112 @@ kernel test_sched_multistream(float* out, float* in_x, float* in_y, int n) {
     }
 }
 
+TEST_F(KernelE2ETest, CSEMatchesUnoptimizedGPUAndCpu) {
+    const char* src =
+        "kernel test_cse_differential(int* out, int* a, int* b, int n) {\n"
+        "    int i = block_idx * block_dim + thread_idx;\n"
+        "    if (i < n) {\n"
+        "        int v1 = a[i];\n"
+        "        int v2 = a[i];\n"
+        "        int sum = v1 + v2;\n"
+        "        int c1 = v1 * 3 + v2 * 5;\n"
+        "        int c2 = v2 * 5 + v1 * 3;\n"
+        "        b[i] = sum + c1 + c2;\n"
+        "        int v3 = a[i];\n"
+        "        out[i] = v3 + b[i];\n"
+        "    }\n"
+        "}\n";
+
+    const int N = 256;
+    for (bool optimize : {false, true}) {
+        std::string optName = optimize ? "-O1" : "-O0";
+        std::string ptx = compileSourceToPTX(src, optimize);
+        ASSERT_FALSE(ptx.empty()) << optName;
+        CUmodule mod = loadPTX(ptx);
+        ASSERT_NE(mod, nullptr) << optName;
+        CUfunction func;
+        CHECK_CUDA(cuModuleGetFunction(&func, mod, "test_cse_differential"));
+
+        // Case 1: a and b are disjoint
+        {
+            std::vector<int32_t> h_a(N), h_b(N, 0), h_out(N, 0), h_ref(N, 0);
+            for (int i = 0; i < N; ++i) {
+                h_a[i] = i + 1;
+                int v1 = h_a[i];
+                int v2 = h_a[i];
+                int sum = v1 + v2;
+                int c1 = v1 * 3 + v2 * 5;
+                int c2 = v2 * 5 + v1 * 3;
+                int b_val = sum + c1 + c2;
+                int v3 = h_a[i];
+                h_ref[i] = v3 + b_val;
+            }
+
+            CUdeviceptr d_a, d_b, d_out;
+            CHECK_CUDA(cuMemAlloc(&d_a, N * sizeof(int32_t)));
+            CHECK_CUDA(cuMemAlloc(&d_b, N * sizeof(int32_t)));
+            CHECK_CUDA(cuMemAlloc(&d_out, N * sizeof(int32_t)));
+
+            CHECK_CUDA(cuMemcpyHtoD(d_a, h_a.data(), N * sizeof(int32_t)));
+            CHECK_CUDA(cuMemsetD8(d_b, 0, N * sizeof(int32_t)));
+
+            int n_arg = N;
+            void* args[] = { &d_out, &d_a, &d_b, &n_arg };
+            CHECK_CUDA(cuLaunchKernel(func, 1, 1, 1, N, 1, 1, 0, 0, args, 0));
+            CHECK_CUDA(cuCtxSynchronize());
+
+            CHECK_CUDA(cuMemcpyDtoH(h_out.data(), d_out, N * sizeof(int32_t)));
+
+            for (int i = 0; i < N; ++i) {
+                EXPECT_EQ(h_out[i], h_ref[i]) << optName << " disjoint failed at " << i;
+            }
+
+            CHECK_CUDA(cuMemFree(d_a));
+            CHECK_CUDA(cuMemFree(d_b));
+            CHECK_CUDA(cuMemFree(d_out));
+        }
+
+        // Case 2: a and b ALIAS (a == b)
+        // Store to b[i] modifies a[i] before v3 = a[i] read!
+        {
+            std::vector<int32_t> h_a(N), h_out(N, 0), h_ref(N, 0);
+            for (int i = 0; i < N; ++i) {
+                h_a[i] = i + 1;
+                int v1 = h_a[i];
+                int v2 = h_a[i];
+                int sum = v1 + v2;
+                int c1 = v1 * 3 + v2 * 5;
+                int c2 = v2 * 5 + v1 * 3;
+                int b_val = sum + c1 + c2;
+                int v3 = b_val; // Since a == b, v3 reads the stored b_val!
+                h_ref[i] = v3 + b_val;
+            }
+
+            CUdeviceptr d_ab, d_out;
+            CHECK_CUDA(cuMemAlloc(&d_ab, N * sizeof(int32_t)));
+            CHECK_CUDA(cuMemAlloc(&d_out, N * sizeof(int32_t)));
+
+            CHECK_CUDA(cuMemcpyHtoD(d_ab, h_a.data(), N * sizeof(int32_t)));
+
+            int n_arg = N;
+            void* args[] = { &d_out, &d_ab, &d_ab, &n_arg };
+            CHECK_CUDA(cuLaunchKernel(func, 1, 1, 1, N, 1, 1, 0, 0, args, 0));
+            CHECK_CUDA(cuCtxSynchronize());
+
+            CHECK_CUDA(cuMemcpyDtoH(h_out.data(), d_out, N * sizeof(int32_t)));
+
+            for (int i = 0; i < N; ++i) {
+                EXPECT_EQ(h_out[i], h_ref[i]) << optName << " aliased failed at " << i;
+            }
+
+            CHECK_CUDA(cuMemFree(d_ab));
+            CHECK_CUDA(cuMemFree(d_out));
+        }
+
+        CHECK_CUDA(cuModuleUnload(mod));
+    }
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     ::testing::AddGlobalTestEnvironment(new CudaEnvironment);

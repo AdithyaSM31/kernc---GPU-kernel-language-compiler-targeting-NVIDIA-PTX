@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <unordered_map>
 #include <unordered_set>
 #include <variant>
@@ -814,7 +815,345 @@ static std::vector<IRInst> scheduleWindow(const std::vector<IRInst>& window,
     return scheduled;
 }
 
+static bool isCommutativeOp(IROp op) {
+    switch (op) {
+        case IROp::Add:
+        case IROp::Mul:
+        case IROp::And:
+        case IROp::Or:
+        case IROp::Xor:
+        case IROp::FAdd:
+        case IROp::FMul:
+        case IROp::AddS64:
+        case IROp::MulWide:
+        case IROp::SetpEq:
+        case IROp::SetpNe:
+        case IROp::SetpFEq:
+        case IROp::SetpFNe:
+        case IROp::XorPred:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool isCSECandidate(const IRInst& inst) {
+    switch (inst.op) {
+        case IROp::Add:
+        case IROp::Sub:
+        case IROp::Mul:
+        case IROp::Div:
+        case IROp::Mod:
+        case IROp::And:
+        case IROp::Or:
+        case IROp::Xor:
+        case IROp::Not:
+        case IROp::Shl:
+        case IROp::ShrS32:
+        case IROp::ShrU32:
+        case IROp::FAdd:
+        case IROp::FSub:
+        case IROp::FMul:
+        case IROp::FDiv:
+        case IROp::Neg:
+        case IROp::FNeg:
+        case IROp::CvtF2I:
+        case IROp::CvtI2F:
+        case IROp::CvtPredToS32:
+        case IROp::CvtPredToF32:
+        case IROp::NotPred:
+        case IROp::XorPred:
+        case IROp::SetpLt:
+        case IROp::SetpGt:
+        case IROp::SetpLe:
+        case IROp::SetpGe:
+        case IROp::SetpEq:
+        case IROp::SetpNe:
+        case IROp::SetpFLt:
+        case IROp::SetpFGt:
+        case IROp::SetpFLe:
+        case IROp::SetpFGe:
+        case IROp::SetpFEq:
+        case IROp::SetpFNe:
+        case IROp::MulWide:
+        case IROp::AddS64:
+        case IROp::CvtaGlobal:
+        case IROp::SharedAddr:
+        case IROp::LoadImm:
+        case IROp::LoadParam:
+        case IROp::ReadSReg:
+        case IROp::Load:
+            return true;
+        default:
+            return false;
+    }
+}
+
+struct ExprKey {
+    IROp op = IROp::Mov;
+    IRType type = IRType::S32;
+    VReg src1 = 0;
+    VReg src2 = 0;
+    int32_t immInt = 0;
+    float immFloat = 0.0f;
+    std::string symbol;
+    std::string specialReg;
+    int paramIndex = 0;
+    AddrSpace space = AddrSpace::Global;
+
+    bool operator==(const ExprKey& o) const {
+        if (op != o.op || type != o.type || src1 != o.src1 || src2 != o.src2)
+            return false;
+        if (immInt != o.immInt) return false;
+        uint32_t fb1 = 0, fb2 = 0;
+        std::memcpy(&fb1, &immFloat, sizeof(fb1));
+        std::memcpy(&fb2, &o.immFloat, sizeof(fb2));
+        if (fb1 != fb2) return false;
+        if (symbol != o.symbol || specialReg != o.specialReg || paramIndex != o.paramIndex)
+            return false;
+        if (space != o.space) return false;
+        return true;
+    }
+};
+
+struct ExprKeyHash {
+    size_t operator()(const ExprKey& k) const {
+        size_t h = 0;
+        auto hashCombine = [&h](size_t val) {
+            h ^= val + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        };
+        hashCombine(static_cast<size_t>(k.op));
+        hashCombine(static_cast<size_t>(k.type));
+        hashCombine(k.src1);
+        hashCombine(k.src2);
+        hashCombine(static_cast<uint32_t>(k.immInt));
+        uint32_t fb = 0;
+        std::memcpy(&fb, &k.immFloat, sizeof(fb));
+        hashCombine(fb);
+        hashCombine(std::hash<std::string>{}(k.symbol));
+        hashCombine(std::hash<std::string>{}(k.specialReg));
+        hashCombine(static_cast<size_t>(k.paramIndex));
+        hashCombine(static_cast<size_t>(k.space));
+        return h;
+    }
+};
+
+static ExprKey makeExprKey(const IRInst& inst, const std::unordered_map<VReg, std::string>& sharedObjects) {
+    ExprKey k;
+    k.op = inst.op;
+    k.type = inst.type;
+    k.src1 = inst.src1;
+    k.src2 = inst.src2;
+    k.immInt = inst.immInt;
+    k.immFloat = inst.immFloat;
+    k.symbol = inst.symbol;
+    k.specialReg = inst.specialReg;
+    k.paramIndex = inst.paramIndex;
+    k.space = inst.space;
+
+    if (inst.op == IROp::Load && inst.space == AddrSpace::Shared) {
+        auto it = sharedObjects.find(inst.src1);
+        if (it != sharedObjects.end()) {
+            k.symbol = it->second;
+        }
+    }
+    return k;
+}
+
 } // anonymous namespace
+
+bool Optimizer::runCSE(IRFunction& fn) {
+    bool changedOverall = false;
+    auto sharedObjects = computeSharedObjects(fn, computePointerBases(fn));
+
+    for (auto& bb : fn.blocks) {
+        std::unordered_map<VReg, VReg> copyMap;
+        std::unordered_map<ExprKey, VReg, ExprKeyHash> availExprs;
+
+        auto getRoot = [&](VReg r) -> VReg {
+            if (r == 0) return 0;
+            VReg cur = r;
+            std::unordered_set<VReg> visited;
+            while (true) {
+                auto it = copyMap.find(cur);
+                if (it == copyMap.end()) break;
+                if (visited.count(it->second)) break;
+                visited.insert(cur);
+                cur = it->second;
+            }
+            return cur;
+        };
+
+        auto killRegister = [&](VReg reg) {
+            if (reg == 0) return;
+            copyMap.erase(reg);
+            for (auto it = copyMap.begin(); it != copyMap.end(); ) {
+                if (it->second == reg) {
+                    it = copyMap.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            for (auto it = availExprs.begin(); it != availExprs.end(); ) {
+                if (it->second == reg || it->first.src1 == reg || it->first.src2 == reg) {
+                    it = availExprs.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        };
+
+        auto killGlobalLoads = [&]() {
+            for (auto it = availExprs.begin(); it != availExprs.end(); ) {
+                if (it->first.op == IROp::Load && it->first.space == AddrSpace::Global) {
+                    it = availExprs.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        };
+
+        auto killSharedLoads = [&](const std::string& targetArraySym) {
+            for (auto it = availExprs.begin(); it != availExprs.end(); ) {
+                if (it->first.op == IROp::Load && it->first.space == AddrSpace::Shared) {
+                    if (targetArraySym.empty() || it->first.symbol.empty() ||
+                        targetArraySym == it->first.symbol) {
+                        it = availExprs.erase(it);
+                    } else {
+                        ++it;
+                    }
+                } else {
+                    ++it;
+                }
+            }
+        };
+
+        auto killAllLoads = [&]() {
+            for (auto it = availExprs.begin(); it != availExprs.end(); ) {
+                if (it->first.op == IROp::Load) {
+                    it = availExprs.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        };
+
+        for (size_t i = 0; i < bb.instructions.size(); ++i) {
+            auto& inst = bb.instructions[i];
+
+            // 1. Copy propagate into operands
+            if (inst.src1 != 0) {
+                VReg root = getRoot(inst.src1);
+                if (root != inst.src1 && fn.regType(root) == fn.regType(inst.src1)) {
+                    inst.src1 = root;
+                    changedOverall = true;
+                }
+            }
+            if (inst.src2 != 0) {
+                VReg root = getRoot(inst.src2);
+                if (root != inst.src2 && fn.regType(root) == fn.regType(inst.src2)) {
+                    inst.src2 = root;
+                    changedOverall = true;
+                }
+            }
+            if (inst.src3 != 0) {
+                VReg root = getRoot(inst.src3);
+                if (root != inst.src3 && fn.regType(root) == fn.regType(inst.src3)) {
+                    inst.src3 = root;
+                    changedOverall = true;
+                }
+            }
+            for (auto& a : inst.args) {
+                if (a != 0) {
+                    VReg root = getRoot(a);
+                    if (root != a && fn.regType(root) == fn.regType(a)) {
+                        a = root;
+                        changedOverall = true;
+                    }
+                }
+            }
+
+            // 2. Canonicalize commutative operands
+            if (isCommutativeOp(inst.op) && inst.src1 != 0 && inst.src2 != 0) {
+                if (inst.src1 > inst.src2) {
+                    std::swap(inst.src1, inst.src2);
+                }
+            }
+
+            // 3. Handle Mov
+            if (inst.op == IROp::Mov) {
+                if (inst.dst == inst.src1 && inst.dst != 0) {
+                    bb.instructions.erase(bb.instructions.begin() + i);
+                    --i;
+                    changedOverall = true;
+                    continue;
+                }
+                if (inst.dst != 0) {
+                    killRegister(inst.dst);
+                    if (inst.src1 != 0) {
+                        copyMap[inst.dst] = getRoot(inst.src1);
+                    }
+                }
+                continue;
+            }
+
+            // 4. Check if CSE candidate
+            bool cseCandidate = isCSECandidate(inst);
+            if (cseCandidate && inst.dst != 0) {
+                ExprKey key = makeExprKey(inst, sharedObjects);
+                auto it = availExprs.find(key);
+                if (it != availExprs.end() && it->second != 0) {
+                    VReg availReg = it->second;
+                    killRegister(inst.dst);
+                    if (inst.dst == availReg) {
+                        bb.instructions.erase(bb.instructions.begin() + i);
+                        --i;
+                        changedOverall = true;
+                        continue;
+                    }
+                    inst.op = IROp::Mov;
+                    inst.src1 = availReg;
+                    inst.src2 = 0;
+                    inst.src3 = 0;
+                    inst.immInt = 0;
+                    inst.immFloat = 0.0f;
+                    inst.symbol.clear();
+                    inst.specialReg.clear();
+                    copyMap[inst.dst] = getRoot(availReg);
+                    changedOverall = true;
+                    continue;
+                } else {
+                    killRegister(inst.dst);
+                    if (inst.dst != inst.src1 && inst.dst != inst.src2 && inst.dst != inst.src3) {
+                        availExprs[key] = inst.dst;
+                    }
+                }
+            } else {
+                std::vector<VReg> defs;
+                getDefs(inst, defs);
+                for (VReg d : defs) {
+                    killRegister(d);
+                }
+            }
+
+            // 5. Memory fence and store clobber handling
+            if (isStoreOp(inst.op)) {
+                if (inst.space == AddrSpace::Global) {
+                    killGlobalLoads();
+                } else if (inst.space == AddrSpace::Shared) {
+                    std::string sym;
+                    auto sit = sharedObjects.find(inst.src1);
+                    if (sit != sharedObjects.end()) sym = sit->second;
+                    killSharedLoads(sym);
+                }
+            } else if (isFenceOrBarrier(inst.op)) {
+                killAllLoads();
+            }
+        }
+    }
+
+    return changedOverall;
+}
 
 bool Optimizer::runInstructionScheduling(IRFunction& fn) {
     bool changedOverall = false;
@@ -859,8 +1198,9 @@ bool Optimizer::runPasses(IRFunction& fn) {
     // Iterate passes until convergence
     for (int iter = 0; iter < 10; ++iter) {
         bool cfChanged = runConstantFolding(fn);
+        bool cseChanged = runCSE(fn);
         bool dceChanged = runDeadCodeElimination(fn);
-        if (cfChanged || dceChanged) {
+        if (cfChanged || cseChanged || dceChanged) {
             changed = true;
         } else {
             break;
