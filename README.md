@@ -35,7 +35,7 @@ What it supports:
 - `.file` / `.loc` source line info with `-lineinfo`
 - diagnostics with `file:line:column` and a caret
 
-The suite has 202 tests, and all of them pass, both in a normal build and under
+The suite has 203 tests, and all of them pass, both in a normal build and under
 UndefinedBehaviorSanitizer.
 
 ---
@@ -307,14 +307,19 @@ This reduces the kernel from 26 instructions down to 9 instructions (2.89x instr
 
 `kernc`'s optimizer (`-O1`) now performs call graph construction (`CallGraph::build`), cycle and recursion detection (`CallGraph::isRecursive`), and inlines small non-recursive device functions at the IR level:
 
-| Metric | kernc (-O0, un-inlined) | kernc (-O1, inlined) | nvcc (-arch=sm_86 -O3) |
+| Metric | kernc (-O0, un-inlined) | kernc (-O1, inlined) | nvcc 13.0 (`-arch=sm_86`) |
 |---|---|---|---|
-| `use_functions` SASS calls | 7 (`in_range` x2, `square`, `store_twice`, `collatz_steps`, `fib`, `is_even`) | 2 (`fib`, `is_even`) | 2 (`fib`, `is_even`) |
-| Cubin total SASS calls | 11 | 6 | 6 |
-| Cubin total SASS instructions | 240 (489 cuobjdump lines) | 184 (377 cuobjdump lines, -23.3%) | 152 (313 cuobjdump lines) |
-| `use_functions` SASS instructions | 91 | 89 | 67 |
+| SASS `CALL` instructions | 11 | 6 | 6 |
+| SASS instructions (non-NOP) | 228 | 145 (−36%) | 143 |
 | `use_functions` registers | 24 | 24 | 24 |
 | `use_functions` stack frame | 0 bytes | 0 bytes | 0 bytes |
+
+Measured from the cubin with `cuobjdump -sass` (all non-NOP instructions and `CALL`
+instructions; the listing includes the functions that stay out of line, so these are
+whole-module counts) and with `ptxas -v` / `nvcc -Xptxas -v` for registers and stack frame.
+The CUDA version is a line-by-line translation of `examples/functions.kern`. After inlining,
+the remaining 6 calls are the same in both: the recursive `fib` and the mutually recursive
+`is_even`/`is_odd`.
 
 `kernc` matches `nvcc`'s inlining decisions exactly:
 - `square`, `in_range` (both call sites), `store_twice`, and `collatz_steps` are inlined at the IR level.
@@ -448,6 +453,7 @@ Emitted IR frequently contains dead basic blocks after return instructions (`$L_
 | Unit tests (GoogleTest) | 137 | Lexer 9, parser 16 (including AST ParenExpr preservation), Sema 40 (accept/reject, type/arity rules, warp shuffle sub-warp width checks, parenthesized INT32_MIN overflow diagnostics, definite assignment & barrier divergence warnings, diagnostic locations), IR, passes, scheduling, inlining, CSE, CFG cleanup & non-power-of-two magic division 72 |
 | GPU end-to-end (Driver API) | 31 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
 | Diagnostics | 1 suite, 10 files | `tests/diagnostic/err_*.kern` must fail with the expected message (and location, where given) |
+| No unexpected warnings | 1 | Every kernel in `examples/`, `tests/regress/` and `tests/lineinfo/` compiles without warnings, unless it declares them with `// Expected warning:` |
 | ptxas acceptance | 6 | Every file in `examples/` assembles with `ptxas -arch=sm_86` |
 | ptxas regression | 24 | `tests/regress/*.kern` (12 kernels) assemble at both `-O0` and `-O1` |
 | Line tables | 2 | `kernc -lineinfo` → ptxas → `nvdisasm --print-line-info`; each `//@ REGEX` line must own matching SASS |
@@ -520,6 +526,7 @@ these bugs:
 | Vector intrinsic offsets counted scalars | `load_int4(p, 1)` issued a 16-byte load at a 4-byte boundary: **`CUDA_ERROR_MISALIGNED_ADDRESS`** |
 | Atomics accepted vector targets as int | `atomic_add` on a `float4*` emitted an integer `atom.add.s32` on float data |
 | `kernc-runner` checked only the argument count | An `i32` for a pointer faulted with `CUDA_ERROR_ILLEGAL_ADDRESS`; an `i32` for a float or a buffer for an int printed **`Success!` with wrong results** |
+| `barrier()` inside `if (i < n)` in a regression kernel | Undefined behaviour (possible deadlock) in partially filled blocks; never caught because regression kernels are only assembled. Found by the new barrier-divergence warning once shipped kernels had to compile warning-free |
 
 Every fix is in the commit history, together with a test that failed before the fix.
 

@@ -1,5 +1,8 @@
 // Regression: variables whose first use is not a definition must keep their declared
 // PTX register class (previously emitted as %p / %rd and rejected by ptxas).
+// The reads are deliberately uninitialized, so the definite-assignment check must warn:
+// Expected warning: variable 'j' may be uninitialized
+// Expected warning: variable 's' may be uninitialized
 kernel uninit_vars(int* out, float* fout, int n) {
     int j;
     float s;

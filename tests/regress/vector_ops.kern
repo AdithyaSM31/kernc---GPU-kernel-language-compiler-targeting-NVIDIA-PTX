@@ -16,18 +16,25 @@ kernel test_vector_ops(
     shared float4 s_f4[32];
 
     int i = block_idx * block_dim + thread_idx;
+    int tid = thread_idx;
+    // Declared outside the bounds check: every thread of the block must reach the barrier in
+    // section 4, so out-of-range threads take part in the shared round trip with zero vectors.
+    int2 v2 = int2(0, 0);
+    int4 v4 = make_int4(0, 0, 0, 0);
+    float2 f2 = float2(0.0, 0.0);
+    float4 f4 = make_float4(0, 0, 0, 0);
     if (i < n) {
         // 1. Vector load and store on global memory
-        int2 v2 = in2_i[i];
+        v2 = in2_i[i];
         out2_i[i] = v2;
 
-        int4 v4 = in4_i[i];
+        v4 = in4_i[i];
         out4_i[i] = v4;
 
-        float2 f2 = in2_f[i];
+        f2 = in2_f[i];
         out2_f[i] = f2;
 
-        float4 f4 = in4_f[i];
+        f4 = in4_f[i];
         out4_f[i] = f4;
 
         // 2. Component access and mutation
@@ -63,19 +70,21 @@ kernel test_vector_ops(
         out4_i[i] = constructed_i4;
         out2_f[i] = constructed_f2;
         out4_f[i] = constructed_f4;
+    }
 
-        // 4. Vector load and store through shared memory
-        int tid = thread_idx;
-        if (tid < 32) {
-            s_i4[tid] = v4;
-            s_f4[tid] = f4;
-        }
-        if (tid < 64) {
-            s_i2[tid] = v2;
-            s_f2[tid] = f2;
-        }
-        barrier();
+    // 4. Vector load and store through shared memory. The barrier is outside every
+    //    thread-dependent branch, so all threads of the block reach it.
+    if (tid < 32) {
+        s_i4[tid] = v4;
+        s_f4[tid] = f4;
+    }
+    if (tid < 64) {
+        s_i2[tid] = v2;
+        s_f2[tid] = f2;
+    }
+    barrier();
 
+    if (i < n) {
         if (tid < 32) {
             int4 from_shared_i4 = s_i4[tid];
             from_shared_i4.x = from_shared_i4.x + 1;

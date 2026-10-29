@@ -14,6 +14,11 @@
 - Located in `tests/diagnostic/err_*.kern` (10 test files).
 - Verified automatically by `tests/diagnostic/run_diagnostic_tests.py`.
 - Checks that erroneous programs fail compilation with precise line, column, and diagnostic messages.
+- `tests/diagnostic/check_no_warnings.py` (CTest `shipped_kernels_have_no_unexpected_warnings`)
+  compiles every kernel in `examples/`, `tests/regress/` and `tests/lineinfo/` and fails on any
+  warning, unless the file declares it with a `// Expected warning: <text>` line (then that
+  warning must appear). This turned the barrier-divergence check on the project's own kernels
+  and caught a `barrier()` inside `if (i < n)` in `tests/regress/vector_ops.kern`.
 
 ### 3. PTX Acceptance Tests (`ptxas -arch=sm_86`)
 - `tests/CMakeLists.txt` registers acceptance tests for example kernels:

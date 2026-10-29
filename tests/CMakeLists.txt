@@ -29,6 +29,17 @@ add_test(NAME diagnostic_tests
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/diagnostic/run_diagnostic_tests.py $<TARGET_FILE:kernc> ${CMAKE_CURRENT_SOURCE_DIR}/diagnostic
 )
 
+# 3b. Shipped kernels must compile without warnings (files meant to warn declare it with
+#     "// Expected warning: ..."), so diagnostics such as barrier divergence guard our own kernels.
+file(GLOB SHIPPED_KERNELS
+    "${CMAKE_SOURCE_DIR}/examples/*.kern"
+    "${CMAKE_CURRENT_SOURCE_DIR}/regress/*.kern"
+    "${CMAKE_CURRENT_SOURCE_DIR}/lineinfo/*.kern")
+add_test(NAME shipped_kernels_have_no_unexpected_warnings
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/diagnostic/check_no_warnings.py
+            $<TARGET_FILE:kernc> ${SHIPPED_KERNELS}
+)
+
 # 4. PTX Acceptance Tests (ptxas sm_86)
 if (PTXAS_BIN)
     set(PTX_TEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/ptx_accept")
