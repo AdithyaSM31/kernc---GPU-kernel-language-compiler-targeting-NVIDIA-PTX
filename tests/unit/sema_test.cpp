@@ -651,4 +651,196 @@ TEST(SemaTest, VectorOperationsErrors) {
     }
 }
 
+TEST(SemaTest, CallArgumentTypeCheckWhenArityMismatch) {
+    std::string src =
+        "func int add(int a, int b) {\n"
+        "    return a + b;\n"
+        "}\n"
+        "kernel k() {\n"
+        "    int res = add(1.5, 2, 3);\n"
+        "}\n";
+    DiagnosticsEngine diag;
+    bool ok = checkSource(src, diag);
+    EXPECT_FALSE(ok);
+    EXPECT_TRUE(diag.hasErrors());
+    std::string all = diag.formatAll();
+    // Must report arity error
+    EXPECT_NE(all.find("function 'add' expects 2 argument(s), got 3"), std::string::npos) << all;
+    // Must ALSO report type error on argument 1 (1.5 cannot be passed as int)
+    EXPECT_NE(all.find("argument 1 of 'add': cannot pass 'float' as 'int'"), std::string::npos) << all;
+}
+
+TEST(SemaTest, DefiniteAssignmentWarning) {
+    {
+        // Uninitialized variable used directly
+        std::string src =
+            "kernel k(int* out) {\n"
+            "    int x;\n"
+            "    out[0] = x + 1;\n"
+            "}\n";
+        DiagnosticsEngine diag;
+        bool ok = checkSource(src, diag);
+        EXPECT_TRUE(ok);
+        EXPECT_FALSE(diag.hasErrors());
+        bool foundWarning = false;
+        for (const auto& d : diag.getDiagnostics()) {
+            if (d.level == DiagnosticLevel::Warning &&
+                d.message.find("variable 'x' may be uninitialized") != std::string::npos) {
+                foundWarning = true;
+                EXPECT_EQ(d.loc.line, 3);
+                EXPECT_EQ(d.loc.column, 14);
+            }
+        }
+        EXPECT_TRUE(foundWarning) << diag.formatAll();
+    }
+    {
+        // Assigned in both if and else branches: NO warning
+        std::string src =
+            "kernel k(int* out, int cond) {\n"
+            "    int x;\n"
+            "    if (cond > 0) {\n"
+            "        x = 10;\n"
+            "    } else {\n"
+            "        x = 20;\n"
+            "    }\n"
+            "    out[0] = x;\n"
+            "}\n";
+        DiagnosticsEngine diag;
+        bool ok = checkSource(src, diag);
+        EXPECT_TRUE(ok);
+        EXPECT_FALSE(diag.hasErrors());
+        for (const auto& d : diag.getDiagnostics()) {
+            EXPECT_NE(d.level, DiagnosticLevel::Warning) << diag.formatAll();
+        }
+    }
+    {
+        // Assigned in then branch only: WARNING on subsequent read
+        std::string src =
+            "kernel k(int* out, int cond) {\n"
+            "    int x;\n"
+            "    if (cond > 0) {\n"
+            "        x = 10;\n"
+            "    }\n"
+            "    out[0] = x;\n"
+            "}\n";
+        DiagnosticsEngine diag;
+        bool ok = checkSource(src, diag);
+        EXPECT_TRUE(ok);
+        EXPECT_FALSE(diag.hasErrors());
+        bool foundWarning = false;
+        for (const auto& d : diag.getDiagnostics()) {
+            if (d.level == DiagnosticLevel::Warning &&
+                d.message.find("variable 'x' may be uninitialized") != std::string::npos) {
+                foundWarning = true;
+                EXPECT_EQ(d.loc.line, 6);
+            }
+        }
+        EXPECT_TRUE(foundWarning) << diag.formatAll();
+    }
+}
+
+TEST(SemaTest, BarrierDivergenceWarning) {
+    {
+        // Barrier inside if (thread_idx < 16)
+        std::string src =
+            "kernel k(int* out) {\n"
+            "    if (thread_idx < 16) {\n"
+            "        barrier();\n"
+            "    }\n"
+            "}\n";
+        DiagnosticsEngine diag;
+        bool ok = checkSource(src, diag);
+        EXPECT_TRUE(ok);
+        EXPECT_FALSE(diag.hasErrors());
+        bool foundWarning = false;
+        for (const auto& d : diag.getDiagnostics()) {
+            if (d.level == DiagnosticLevel::Warning &&
+                d.message.find("divergent") != std::string::npos) {
+                foundWarning = true;
+                EXPECT_EQ(d.loc.line, 3);
+            }
+        }
+        EXPECT_TRUE(foundWarning) << diag.formatAll();
+    }
+    {
+        // Barrier inside if (tid < 16) where tid = thread_idx
+        std::string src =
+            "kernel k(int* out) {\n"
+            "    int tid = thread_idx;\n"
+            "    if (tid < 16) {\n"
+            "        barrier();\n"
+            "    }\n"
+            "}\n";
+        DiagnosticsEngine diag;
+        bool ok = checkSource(src, diag);
+        EXPECT_TRUE(ok);
+        EXPECT_FALSE(diag.hasErrors());
+        bool foundWarning = false;
+        for (const auto& d : diag.getDiagnostics()) {
+            if (d.level == DiagnosticLevel::Warning &&
+                d.message.find("divergent") != std::string::npos) {
+                foundWarning = true;
+                EXPECT_EQ(d.loc.line, 4);
+            }
+        }
+        EXPECT_TRUE(foundWarning) << diag.formatAll();
+    }
+    {
+        // Barrier after divergent early return
+        std::string src =
+            "kernel k(int* out, int n) {\n"
+            "    int i = thread_idx;\n"
+            "    if (i >= n) {\n"
+            "        return;\n"
+            "    }\n"
+            "    out[i] = 1;\n"
+            "    barrier();\n"
+            "}\n";
+        DiagnosticsEngine diag;
+        bool ok = checkSource(src, diag);
+        EXPECT_TRUE(ok);
+        EXPECT_FALSE(diag.hasErrors());
+        bool foundWarning = false;
+        for (const auto& d : diag.getDiagnostics()) {
+            if (d.level == DiagnosticLevel::Warning &&
+                d.message.find("early return") != std::string::npos) {
+                foundWarning = true;
+                EXPECT_EQ(d.loc.line, 7);
+            }
+        }
+        EXPECT_TRUE(foundWarning) << diag.formatAll();
+    }
+    {
+        // reduce.kern pattern: NO warning!
+        std::string src =
+            "kernel reduce_sum(float* in, float* partial, int n) {\n"
+            "    shared float sdata[256];\n"
+            "    int tid = thread_idx;\n"
+            "    int i = block_idx * block_dim + thread_idx;\n"
+            "    float v = 0.0;\n"
+            "    if (i < n) {\n"
+            "        v = in[i];\n"
+            "    }\n"
+            "    sdata[tid] = v;\n"
+            "    barrier();\n"
+            "    for (int s = block_dim / 2; s > 0; s = s / 2) {\n"
+            "        if (tid < s) {\n"
+            "            sdata[tid] = sdata[tid + s];\n"
+            "        }\n"
+            "        barrier();\n"
+            "    }\n"
+            "    if (tid == 0) {\n"
+            "        partial[block_idx] = sdata[0];\n"
+            "    }\n"
+            "}\n";
+        DiagnosticsEngine diag;
+        bool ok = checkSource(src, diag);
+        EXPECT_TRUE(ok);
+        EXPECT_FALSE(diag.hasErrors());
+        for (const auto& d : diag.getDiagnostics()) {
+            EXPECT_NE(d.level, DiagnosticLevel::Warning) << diag.formatAll();
+        }
+    }
+}
+
 

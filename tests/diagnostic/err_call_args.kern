@@ -1,0 +1,8 @@
+// Expected error: argument 1 of 'add': cannot pass 'float' as 'int'
+func int add(int a, int b) {
+    return a + b;
+}
+
+kernel k() {
+    int res = add(1.5, 2, 3);
+}

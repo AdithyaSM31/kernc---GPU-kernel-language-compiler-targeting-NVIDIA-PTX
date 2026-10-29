@@ -107,6 +107,9 @@ int main(int argc, char** argv) {
         diag.printAll(std::cerr);
         return 1;
     }
+    if (!diag.getDiagnostics().empty()) {
+        diag.printAll(std::cerr);
+    }
 
     // 3. IR Generation
     kernc::IRGen irgen(diag);

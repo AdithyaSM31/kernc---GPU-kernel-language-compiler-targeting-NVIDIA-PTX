@@ -50,7 +50,9 @@ The compilation pipeline is organized into distinct phases with strict error bou
   - Redefinitions of variables and functions.
   - Undeclared identifier references and undeclared function calls.
   - Calling kernels from device code (kernels are host-launched only).
-  - Function argument count and argument type checking (implicit `int -> float` promotion allowed).
+  - Function argument count and argument type checking (implicit `int -> float` promotion allowed; type checks all arguments even when arity is mismatched).
+  - Definite-assignment dataflow analysis: warns on variable reads that may be uninitialized across branches and loops (`DiagnosticLevel::Warning`).
+  - Barrier-divergence analysis: warns on `barrier()` inside divergent control flow (`thread_idx`-dependent branches) or following a divergent early return.
   - Prohibiting void function calls as values.
   - Return validation: type matching (`int -> float` allowed), void functions returning no value, non-void functions returning a value.
   - Conservative all-paths-return analysis diagnosing missing returns in non-void functions.

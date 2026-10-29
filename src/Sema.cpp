@@ -4,6 +4,56 @@ namespace kernc {
 
 Sema::Sema(DiagnosticsEngine& diag) : diag_(diag) {}
 
+void Sema::enterScope() {
+    symTable_.enterScope();
+    localScopes_.emplace_back();
+}
+
+void Sema::exitScope() {
+    if (!localScopes_.empty()) {
+        for (const auto& var : localScopes_.back()) {
+            localVars_.erase(var);
+            assignedVars_.erase(var);
+            warnedUninitVars_.erase(var);
+            divergentVars_.erase(var);
+        }
+        localScopes_.pop_back();
+    }
+    symTable_.exitScope();
+}
+
+bool Sema::isExprDivergent(const Expr& expr) const {
+    if (auto* b = dynamic_cast<const BuiltinExpr*>(&expr)) {
+        return b->builtin == BuiltinKind::ThreadIdxX ||
+               b->builtin == BuiltinKind::ThreadIdxY ||
+               b->builtin == BuiltinKind::ThreadIdxZ;
+    }
+    if (auto* id = dynamic_cast<const IdentExpr*>(&expr)) {
+        return divergentVars_.count(id->name) > 0;
+    }
+    if (auto* bin = dynamic_cast<const BinaryExpr*>(&expr)) {
+        return isExprDivergent(*bin->lhs) || isExprDivergent(*bin->rhs);
+    }
+    if (auto* un = dynamic_cast<const UnaryExpr*>(&expr)) {
+        return isExprDivergent(*un->operand);
+    }
+    if (auto* idx = dynamic_cast<const IndexExpr*>(&expr)) {
+        return isExprDivergent(*idx->base) || isExprDivergent(*idx->index);
+    }
+    if (auto* mem = dynamic_cast<const MemberExpr*>(&expr)) {
+        return isExprDivergent(*mem->base);
+    }
+    if (auto* cast = dynamic_cast<const CastExpr*>(&expr)) {
+        return isExprDivergent(*cast->operand);
+    }
+    if (auto* call = dynamic_cast<const CallExpr*>(&expr)) {
+        for (const auto& a : call->args) {
+            if (isExprDivergent(*a)) return true;
+        }
+    }
+    return false;
+}
+
 static bool returnsOnAllPaths(const Stmt& stmt) {
     if (dynamic_cast<const ReturnStmt*>(&stmt)) {
         return true;
@@ -76,7 +126,16 @@ bool Sema::checkProgram(Program& program) {
 bool Sema::checkFunction(FunctionDecl& kernel) {
     currentFunction_ = &kernel;
     currentKernel_ = kernel.name;
-    symTable_.enterScope();
+
+    assignedVars_.clear();
+    localVars_.clear();
+    warnedUninitVars_.clear();
+    localScopes_.clear();
+    divergentVars_.clear();
+    divergentControlDepth_ = 0;
+    hasDivergentEarlyReturn_ = false;
+
+    enterScope();
 
     if (functions_.find(kernel.name) == functions_.end()) {
         std::vector<Type> paramTypes;
@@ -113,6 +172,7 @@ bool Sema::checkFunction(FunctionDecl& kernel) {
         if (!symTable_.declare(param.name, param.type)) {
             diag_.error(param.loc, (kernel.isKernel ? "duplicate kernel parameter name '" : "duplicate parameter name '") + param.name + "'");
         }
+        assignedVars_.insert(param.name);
     }
 
     sharedBytes_ = 0;
@@ -140,7 +200,7 @@ bool Sema::checkFunction(FunctionDecl& kernel) {
                     std::to_string(kStaticSharedLimit) + ")");
     }
 
-    symTable_.exitScope();
+    exitScope();
     currentFunction_ = nullptr;
     return !diag_.hasErrors();
 }
@@ -194,10 +254,19 @@ void Sema::checkStmt(Stmt& stmt) {
             checkExpr(*exprStmt->expr);
         }
     } else if (dynamic_cast<BarrierStmt*>(&stmt)) {
-        // barrier() takes no args, returns void
+        if (divergentControlDepth_ > 0) {
+            diag_.warning(stmt.range.begin,
+                "'barrier()' called inside divergent branch; all threads in a block must reach the barrier to avoid deadlock");
+        } else if (hasDivergentEarlyReturn_) {
+            diag_.warning(stmt.range.begin,
+                "'barrier()' called after divergent early return; threads that exited early will never reach this barrier, leading to deadlock");
+        }
     } else if (auto* shared = dynamic_cast<SharedDeclStmt*>(&stmt)) {
         checkSharedDecl(*shared);
     } else if (auto* ret = dynamic_cast<ReturnStmt*>(&stmt)) {
+        if (divergentControlDepth_ > 0) {
+            hasDivergentEarlyReturn_ = true;
+        }
         if (!currentFunction_ || currentFunction_->isKernel) {
             if (ret->value) {
                 checkExpr(*ret->value);
@@ -247,9 +316,20 @@ void Sema::checkVarDecl(VarDeclStmt& stmt) {
         diag_.error(stmt.range.begin, "redefinition of variable '" + stmt.name + "'");
         return;
     }
+    if (!localScopes_.empty()) {
+        localScopes_.back().push_back(stmt.name);
+    }
+    localVars_.insert(stmt.name);
 
     if (stmt.init) {
         Type initType = checkExpr(*stmt.init);
+        if (isExprDivergent(*stmt.init)) {
+            divergentVars_.insert(stmt.name);
+        } else {
+            divergentVars_.erase(stmt.name);
+        }
+        assignedVars_.insert(stmt.name);
+
         if (initType.isVoid()) return;
 
         if (stmt.type == initType) {
@@ -261,6 +341,8 @@ void Sema::checkVarDecl(VarDeclStmt& stmt) {
                 "type mismatch in variable initialization: cannot initialize '" +
                 stmt.type.toString() + "' with '" + initType.toString() + "'");
         }
+    } else {
+        assignedVars_.erase(stmt.name);
     }
 }
 
@@ -273,7 +355,18 @@ void Sema::checkAssign(AssignStmt& stmt) {
             return;
         }
     }
-    Type targetType = checkExpr(*stmt.target);
+
+    Type targetType = Type::makeVoid();
+    if (auto* ident = dynamic_cast<IdentExpr*>(stmt.target.get())) {
+        const Type* t = symTable_.lookup(ident->name);
+        if (!t) {
+            diag_.error(ident->range.begin, "undeclared variable '" + ident->name + "'");
+            return;
+        }
+        targetType = *t;
+    } else {
+        targetType = checkExpr(*stmt.target);
+    }
     Type valueType = checkExpr(*stmt.value);
 
     if (targetType.isVoid() || valueType.isVoid()) return;
@@ -287,6 +380,12 @@ void Sema::checkAssign(AssignStmt& stmt) {
         if (targetType.isPtr()) {
             diag_.error(stmt.target->range.begin, "cannot assign to pointer variable '" + ident->name + "'");
             return;
+        }
+        assignedVars_.insert(ident->name);
+        if (isExprDivergent(*stmt.value)) {
+            divergentVars_.insert(ident->name);
+        } else {
+            divergentVars_.erase(ident->name);
         }
     } else if (dynamic_cast<IndexExpr*>(stmt.target.get())) {
         // Valid lvalue: ptr[i]
@@ -317,10 +416,34 @@ void Sema::checkIf(IfStmt& stmt) {
     if (!isConditionType(condType)) {
         diag_.error(stmt.cond->range.begin, "condition must be a boolean or integer expression (got '" + condType.toString() + "')");
     }
+
+    bool condDiv = isExprDivergent(*stmt.cond);
+    if (condDiv) divergentControlDepth_++;
+
+    auto saveAssigned = assignedVars_;
     checkStmt(*stmt.thenBranch);
+    auto thenAssigned = assignedVars_;
+
     if (stmt.elseBranch) {
+        assignedVars_ = saveAssigned;
         checkStmt(*stmt.elseBranch);
+        auto elseAssigned = assignedVars_;
+
+        if (returnsOnAllPaths(*stmt.thenBranch)) {
+            assignedVars_ = elseAssigned;
+        } else if (returnsOnAllPaths(*stmt.elseBranch)) {
+            assignedVars_ = thenAssigned;
+        } else {
+            assignedVars_.clear();
+            for (const auto& v : thenAssigned) {
+                if (elseAssigned.count(v)) assignedVars_.insert(v);
+            }
+        }
+    } else {
+        assignedVars_ = saveAssigned;
     }
+
+    if (condDiv) divergentControlDepth_--;
 }
 
 void Sema::checkWhile(WhileStmt& stmt) {
@@ -328,11 +451,19 @@ void Sema::checkWhile(WhileStmt& stmt) {
     if (!isConditionType(condType)) {
         diag_.error(stmt.cond->range.begin, "while condition must be a boolean or integer expression (got '" + condType.toString() + "')");
     }
+
+    bool condDiv = isExprDivergent(*stmt.cond);
+    if (condDiv) divergentControlDepth_++;
+
+    auto saveAssigned = assignedVars_;
     checkStmt(*stmt.body);
+    assignedVars_ = saveAssigned;
+
+    if (condDiv) divergentControlDepth_--;
 }
 
 void Sema::checkFor(ForStmt& stmt) {
-    symTable_.enterScope();
+    enterScope();
     if (stmt.init) {
         checkStmt(*stmt.init);
     }
@@ -342,19 +473,26 @@ void Sema::checkFor(ForStmt& stmt) {
             diag_.error(stmt.cond->range.begin, "for loop condition must be a boolean or integer expression (got '" + condType.toString() + "')");
         }
     }
+    bool condDiv = stmt.cond && isExprDivergent(*stmt.cond);
+    if (condDiv) divergentControlDepth_++;
+
+    auto saveAssigned = assignedVars_;
+    checkStmt(*stmt.body);
     if (stmt.step) {
         checkStmt(*stmt.step);
     }
-    checkStmt(*stmt.body);
-    symTable_.exitScope();
+    assignedVars_ = saveAssigned;
+
+    if (condDiv) divergentControlDepth_--;
+    exitScope();
 }
 
 void Sema::checkBlock(BlockStmt& stmt) {
-    symTable_.enterScope();
+    enterScope();
     for (auto& s : stmt.stmts) {
         checkStmt(*s);
     }
-    symTable_.exitScope();
+    exitScope();
 }
 
 Type Sema::checkExpr(Expr& expr) {
@@ -731,11 +869,10 @@ Type Sema::checkCallExpr(CallExpr& expr, bool isExprStmt) {
         diag_.error(expr.range.begin, "function '" + expr.callee + "' expects " +
                     std::to_string(sig.paramTypes.size()) + " argument(s), got " +
                     std::to_string(expr.args.size()));
-        expr.resolvedType = sig.returnType;
-        return expr.resolvedType;
     }
 
-    for (size_t i = 0; i < expr.args.size(); ++i) {
+    size_t checkCount = std::min(expr.args.size(), sig.paramTypes.size());
+    for (size_t i = 0; i < checkCount; ++i) {
         Type argType = checkExpr(*expr.args[i]);
         Type paramType = sig.paramTypes[i];
         if (argType.isVoid()) continue;
@@ -749,6 +886,9 @@ Type Sema::checkCallExpr(CallExpr& expr, bool isExprStmt) {
                         expr.callee + "': cannot pass '" + argType.toString() + "' as '" +
                         paramType.toString() + "'");
         }
+    }
+    for (size_t i = checkCount; i < expr.args.size(); ++i) {
+        checkExpr(*expr.args[i]);
     }
 
     expr.resolvedType = sig.returnType;
@@ -769,6 +909,15 @@ Type Sema::checkIdentExpr(IdentExpr& expr, bool allowSharedArray) {
         expr.resolvedType = Type::makeVoid();
         return expr.resolvedType;
     }
+
+    // Definite-assignment check:
+    if (localVars_.count(expr.name) && !assignedVars_.count(expr.name)) {
+        if (!warnedUninitVars_.count(expr.name)) {
+            diag_.warning(expr.range.begin, "variable '" + expr.name + "' may be uninitialized");
+            warnedUninitVars_.insert(expr.name);
+        }
+    }
+
     expr.resolvedType = *t;
     return expr.resolvedType;
 }

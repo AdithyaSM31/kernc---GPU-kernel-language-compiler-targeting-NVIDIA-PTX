@@ -398,9 +398,9 @@ Emitted IR frequently contains dead basic blocks after return instructions (`$L_
 
 | Suite | Count | What it checks |
 |---|---|---|
-| Unit tests (GoogleTest) | 126 | Lexer 9, parser 15, Sema 34 (accept/reject, type/arity rules, diagnostic locations), IR, passes, scheduling, inlining, CSE & CFG cleanup 68 |
+| Unit tests (GoogleTest) | 129 | Lexer 9, parser 15, Sema 37 (accept/reject, type/arity rules, definite assignment & barrier divergence warnings, diagnostic locations), IR, passes, scheduling, inlining, CSE & CFG cleanup 68 |
 | GPU end-to-end (Driver API) | 29 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
-| Diagnostics | 1 suite, 8 files | `tests/diagnostic/err_*.kern` must fail with the expected message (and location, where given) |
+| Diagnostics | 1 suite, 9 files | `tests/diagnostic/err_*.kern` must fail with the expected message (and location, where given) |
 | ptxas acceptance | 6 | Every file in `examples/` assembles with `ptxas -arch=sm_86` |
 | ptxas regression | 24 | `tests/regress/*.kern` (12 kernels) assemble at both `-O0` and `-O1` |
 | Line tables | 2 | `kernc -lineinfo` → ptxas → `nvdisasm --print-line-info`; each `//@ REGEX` line must own matching SASS |
@@ -443,6 +443,7 @@ Two techniques do most of the work:
   - inverting list scheduling priority (stores high, loads low) fails the load-hoisting latency check (`lastLoadIdx < firstStoreIdx`, on two different shared arrays);
   - disabling load invalidation on stores in CSE fails both the aliased buffer GPU differential test (output 19 vs expected 36) and the memory aliasing unit test;
   - disabling fallthrough branch folding in CFG cleanup fails the branch elimination unit test (`braAfter < braBefore`);
+  - disabling barrier divergence depth checking fails the barrier divergence warning unit test;
   - removing `bar.sync` fails the block-reverse test, first at thread 64, the first thread of
     the third warp, which read data before its partner warp had written it;
   - removing statement locations fails all six line-table checks;

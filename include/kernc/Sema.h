@@ -3,6 +3,7 @@
 #include "kernc/AST.h"
 #include "kernc/Diagnostics.h"
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <string>
 
@@ -77,6 +78,10 @@ private:
 
     Type checkCallExpr(CallExpr& expr, bool isExprStmt);
 
+    void enterScope();
+    void exitScope();
+    bool isExprDivergent(const Expr& expr) const;
+
     bool isConditionType(const Type& t) const {
         return t.isBool() || t.isInt();
     }
@@ -94,6 +99,17 @@ private:
     std::unordered_map<std::string, FunctionSignature> functions_;
     FunctionDecl* currentFunction_ = nullptr;
     std::string currentKernel_; // for diagnostics such as "kernel 'k' cannot return a value"
+
+    // Definite-assignment tracking
+    std::unordered_set<std::string> assignedVars_;
+    std::unordered_set<std::string> localVars_;
+    std::unordered_set<std::string> warnedUninitVars_;
+    std::vector<std::vector<std::string>> localScopes_;
+
+    // Barrier-divergence tracking
+    std::unordered_set<std::string> divergentVars_;
+    int divergentControlDepth_ = 0;
+    bool hasDivergentEarlyReturn_ = false;
 
     // Static shared memory per block on sm_86 (ptxas reports the limit as 0xc000).
     static constexpr int64_t kStaticSharedLimit = 48 * 1024;
