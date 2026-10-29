@@ -197,6 +197,7 @@ std::string PTXEmitter::emitFunction(const IRFunction& fn) {
             std::string s1 = alloc.get(inst.src1);
             std::string s2 = alloc.get(inst.src2);
             std::string s3 = alloc.get(inst.src3);
+            std::string s4 = alloc.get(inst.src4);
 
             switch (inst.op) {
                 // Integer Arithmetic
@@ -484,18 +485,26 @@ std::string PTXEmitter::emitFunction(const IRFunction& fn) {
                     break;
 
                 // Warp-Level Intrinsics
-                case IROp::ShflIdx:
-                    ss << "    shfl.sync.idx.b32 " << dst << ", " << s1 << ", " << s2 << ", " << inst.immInt << ", " << s3 << ";\n";
+                case IROp::ShflIdx: {
+                    std::string c_op = inst.src4 != 0 ? s4 : std::to_string(inst.immInt);
+                    ss << "    shfl.sync.idx.b32 " << dst << ", " << s1 << ", " << s2 << ", " << c_op << ", " << s3 << ";\n";
                     break;
-                case IROp::ShflDown:
-                    ss << "    shfl.sync.down.b32 " << dst << ", " << s1 << ", " << s2 << ", " << inst.immInt << ", " << s3 << ";\n";
+                }
+                case IROp::ShflDown: {
+                    std::string c_op = inst.src4 != 0 ? s4 : std::to_string(inst.immInt);
+                    ss << "    shfl.sync.down.b32 " << dst << ", " << s1 << ", " << s2 << ", " << c_op << ", " << s3 << ";\n";
                     break;
-                case IROp::ShflUp:
-                    ss << "    shfl.sync.up.b32 " << dst << ", " << s1 << ", " << s2 << ", " << inst.immInt << ", " << s3 << ";\n";
+                }
+                case IROp::ShflUp: {
+                    std::string c_op = inst.src4 != 0 ? s4 : std::to_string(inst.immInt);
+                    ss << "    shfl.sync.up.b32 " << dst << ", " << s1 << ", " << s2 << ", " << c_op << ", " << s3 << ";\n";
                     break;
-                case IROp::ShflBfly:
-                    ss << "    shfl.sync.bfly.b32 " << dst << ", " << s1 << ", " << s2 << ", " << inst.immInt << ", " << s3 << ";\n";
+                }
+                case IROp::ShflBfly: {
+                    std::string c_op = inst.src4 != 0 ? s4 : std::to_string(inst.immInt);
+                    ss << "    shfl.sync.bfly.b32 " << dst << ", " << s1 << ", " << s2 << ", " << c_op << ", " << s3 << ";\n";
                     break;
+                }
                 case IROp::VoteBallot:
                     ss << "    vote.sync.ballot.b32 " << dst << ", " << s1 << ", " << s2 << ";\n";
                     break;

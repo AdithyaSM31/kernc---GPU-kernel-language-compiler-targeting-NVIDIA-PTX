@@ -155,21 +155,24 @@ The IR is a non-SSA 3-address virtual-register code organized into Basic Blocks 
 12. **Warp-Level Intrinsics (Data Exchange & Synchronization)**:
     - Intra-warp communication without shared memory via PTX `shfl.sync` and `vote.sync` instructions.
     - IR Opcode mapping:
-      - `__shfl_sync` / `shfl_sync` -> `IROp::ShflIdx` -> `shfl.sync.idx.b32 dst, val, src_lane, 31, mask;`
-      - `__shfl_down_sync` / `shfl_down_sync` -> `IROp::ShflDown` -> `shfl.sync.down.b32 dst, val, delta, 31, mask;`
-      - `__shfl_up_sync` / `shfl_up_sync` -> `IROp::ShflUp` -> `shfl.sync.up.b32 dst, val, delta, 0, mask;`
-      - `__shfl_xor_sync` / `shfl_xor_sync` -> `IROp::ShflBfly` -> `shfl.sync.bfly.b32 dst, val, lane_mask, 31, mask;`
+      - `__shfl_sync` / `shfl_sync` -> `IROp::ShflIdx` -> `shfl.sync.idx.b32 dst, val, src_lane, c, mask;`
+      - `__shfl_down_sync` / `shfl_down_sync` -> `IROp::ShflDown` -> `shfl.sync.down.b32 dst, val, delta, c, mask;`
+      - `__shfl_up_sync` / `shfl_up_sync` -> `IROp::ShflUp` -> `shfl.sync.up.b32 dst, val, delta, c, mask;`
+      - `__shfl_xor_sync` / `shfl_xor_sync` -> `IROp::ShflBfly` -> `shfl.sync.bfly.b32 dst, val, lane_mask, c, mask;`
       - `__ballot_sync` / `ballot_sync` -> `IROp::VoteBallot` -> `vote.sync.ballot.b32 dst, pred, mask;`
       - `__activemask` / `activemask` -> `IROp::Activemask` -> `activemask.b32 dst;`
-    - Operand types and clamp values:
+    - Operand types, sub-warp segmentation, and clamp values:
       - `ptxas` on `sm_86` accepts both 32-bit integer (`.s32`) and 32-bit float (`.f32`) registers as operands to `shfl.sync.*.b32`.
-      - Clamp values match CUDA hardware semantics: clamp `31` for index, down, and butterfly shuffle (clamping upper bound to warp size - 1); clamp `0` for up shuffle (threads with source lane < 0 receive their own unmodified register value).
+      - PTX operand `c` specifies sub-warp segment boundaries in bits 12:8 and clamping behavior in bits 4:0: $c = ((32 - \text{width}) \ll 8) \mid \text{clamp}$.
+      - For full warp (`width = 32`, the default): `c = clamp` (31 for index, down, and butterfly shuffle; 0 for up shuffle).
+      - For sub-warp widths $W \in \{2, 4, 8, 16\}$, `c` encodes segment mask $(32 - W) \ll 8$ with the clamp. For literal widths, `IRGen` computes $c$ at compile time and stores it in `IRInst::immInt`; for dynamic width expressions, `IRGen` emits the calculation into virtual registers and passes $c$ via `IRInst::src4`, which `PTXEmitter` outputs as a register operand.
+      - Clamp values match CUDA hardware semantics: clamp `31` for index, down, and butterfly shuffle (clamping upper bound to sub-warp width - 1); clamp `0` for up shuffle (threads with source lane < 0 receive their own unmodified register value).
       - Predicates passed to `vote.sync.ballot` are converted to `.pred` registers via `emitAsPred`.
     - Optimization and Synchronization Semantics:
       - `shfl.sync` and `vote.sync` are intra-warp synchronization instructions requiring all non-exited threads in `mask` to arrive before executing. Dead Code Elimination (DCE) explicitly classifies them as side-effecting operations to guarantee that unused shuffle results do not compromise warp synchronization convergence.
       - In contrast, `activemask` is a pure query of the active thread mask with no cross-thread synchronization barrier; dead definitions of `activemask` are cleanly eliminated by DCE when its result register is unused.
-      - Register scanner in `PTXEmitter` and register use counter in `Passes` account for 3-input operands via `IRInst::src3`.
-      - Default clamps (31 for idx/down/bfly, 0 for up) are stored on `IRInst::immInt` upon instruction construction and emitted directly into PTX.
+      - Register scanner in `PTXEmitter` and register use counter in `Passes` account for 4-input operands via `IRInst::src3` (mask) and `IRInst::src4` (dynamic sub-warp width operand `c`).
+      - Immediate clamps and literal width encodings are stored in `IRInst::immInt` upon instruction construction and emitted directly into PTX as integer literals.
 
 13. **Atomic Memory Operations (`atom.global`, `atom.shared`)**:
     - Hardware atomic read-modify-write memory transactions across global and shared address spaces.

@@ -115,6 +115,7 @@ struct IRInst {
     VReg src1 = 0;
     VReg src2 = 0;
     VReg src3 = 0;
+    VReg src4 = 0;
     IRType type = IRType::S32;
 
     int32_t immInt = 0;

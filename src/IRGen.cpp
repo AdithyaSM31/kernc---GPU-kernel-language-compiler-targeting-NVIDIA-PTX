@@ -209,7 +209,10 @@ void IRGen::emitVarDecl(const VarDeclStmt& stmt, IRFunction& fn) {
 }
 
 void IRGen::emitAssign(const AssignStmt& stmt, IRFunction& fn) {
-    if (auto* ident = dynamic_cast<const IdentExpr*>(stmt.target.get())) {
+    const Expr* target = stmt.target.get();
+    while (auto* p = dynamic_cast<const ParenExpr*>(target)) target = p->subExpr.get();
+
+    if (auto* ident = dynamic_cast<const IdentExpr*>(target)) {
         const VarInfo* vInfo = getVar(ident->name);
         if (vInfo->type.isVector()) {
             std::vector<VReg> valRegs = emitVectorExpr(*stmt.value, fn);
@@ -226,14 +229,17 @@ void IRGen::emitAssign(const AssignStmt& stmt, IRFunction& fn) {
             valReg = cvtReg;
         }
         fn.emit(IRInst{IROp::Mov, vInfo->reg, valReg, 0, toIRType(vInfo->type)});
-    } else if (auto* mem = dynamic_cast<const MemberExpr*>(stmt.target.get())) {
+    } else if (auto* mem = dynamic_cast<const MemberExpr*>(target)) {
         int compIdx = 0;
         if (mem->member == "x") compIdx = 0;
         else if (mem->member == "y") compIdx = 1;
         else if (mem->member == "z") compIdx = 2;
         else if (mem->member == "w") compIdx = 3;
 
-        if (auto* baseIdent = dynamic_cast<const IdentExpr*>(mem->base.get())) {
+        const Expr* base = mem->base.get();
+        while (auto* p = dynamic_cast<const ParenExpr*>(base)) base = p->subExpr.get();
+
+        if (auto* baseIdent = dynamic_cast<const IdentExpr*>(base)) {
             const VarInfo* vInfo = getVar(baseIdent->name);
             if (vInfo && vInfo->type.isVector()) {
                 VReg valReg = emitExpr(*stmt.value, fn);
@@ -246,7 +252,7 @@ void IRGen::emitAssign(const AssignStmt& stmt, IRFunction& fn) {
                 fn.emit(IRInst{IROp::Mov, vInfo->regs[compIdx], valReg, 0, elemTy});
                 return;
             }
-        } else if (auto* baseIdx = dynamic_cast<const IndexExpr*>(mem->base.get())) {
+        } else if (auto* baseIdx = dynamic_cast<const IndexExpr*>(base)) {
             AddrSpace space;
             IRType elemType;
             VReg baseAddr = emitElementAddress(*baseIdx, fn, space, elemType);
@@ -343,7 +349,9 @@ VReg IRGen::emitElementAddress(const IndexExpr& idx, IRFunction& fn, AddrSpace& 
 }
 
 VReg IRGen::emitMemoryAddress(const Expr& baseExpr, const Expr* indexExpr, IRFunction& fn, AddrSpace& space, IRType& elemType) {
-    auto* baseIdent = dynamic_cast<const IdentExpr*>(&baseExpr);
+    const Expr* b = &baseExpr;
+    while (auto* p = dynamic_cast<const ParenExpr*>(b)) b = p->subExpr.get();
+    auto* baseIdent = dynamic_cast<const IdentExpr*>(b);
     const VarInfo* baseInfo = getVar(baseIdent->name);
     bool isFloat = (baseInfo->type.pointeeKind == Type::Float ||
                     baseInfo->type.pointeeKind == Type::Float2 ||
@@ -448,6 +456,7 @@ void IRGen::emitWhile(const WhileStmt& stmt, IRFunction& fn) {
 
 bool IRGen::extractIntConstant(const Expr* expr, int64_t& outVal) {
     if (!expr) return false;
+    while (auto* p = dynamic_cast<const ParenExpr*>(expr)) expr = p->subExpr.get();
     if (auto* lit = dynamic_cast<const IntLiteralExpr*>(expr)) {
         outVal = lit->value;
         return true;
@@ -466,7 +475,9 @@ bool IRGen::extractIntConstant(const Expr* expr, int64_t& outVal) {
 
 bool IRGen::hasAssignmentTo(const Stmt& stmt, const std::string& varName) {
     if (auto* assign = dynamic_cast<const AssignStmt*>(&stmt)) {
-        if (auto* id = dynamic_cast<const IdentExpr*>(assign->target.get())) {
+        const Expr* target = assign->target.get();
+        while (auto* p = dynamic_cast<const ParenExpr*>(target)) target = p->subExpr.get();
+        if (auto* id = dynamic_cast<const IdentExpr*>(target)) {
             if (id->name == varName) return true;
         }
         return false;
@@ -519,20 +530,26 @@ bool IRGen::tryGetConstantTripCount(const ForStmt& stmt, int64_t& tripCount, int
     }
 
     // 2. Cond: i < C_end, i <= C_end, etc.
-    auto* condBin = dynamic_cast<const BinaryExpr*>(stmt.cond.get());
+    const Expr* condExpr = stmt.cond.get();
+    while (auto* p = dynamic_cast<const ParenExpr*>(condExpr)) condExpr = p->subExpr.get();
+    auto* condBin = dynamic_cast<const BinaryExpr*>(condExpr);
     if (!condBin) return false;
 
     int64_t condConst = 0;
     BinaryOp op = condBin->op;
     bool varOnLhs = false;
 
-    if (auto* id = dynamic_cast<const IdentExpr*>(condBin->lhs.get())) {
+    const Expr* condLhs = condBin->lhs.get();
+    while (auto* p = dynamic_cast<const ParenExpr*>(condLhs)) condLhs = p->subExpr.get();
+    if (auto* id = dynamic_cast<const IdentExpr*>(condLhs)) {
         if (id->name == varName && extractIntConstant(condBin->rhs.get(), condConst)) {
             varOnLhs = true;
         }
     }
     if (!varOnLhs) {
-        if (auto* id = dynamic_cast<const IdentExpr*>(condBin->rhs.get())) {
+        const Expr* condRhs = condBin->rhs.get();
+        while (auto* p = dynamic_cast<const ParenExpr*>(condRhs)) condRhs = p->subExpr.get();
+        if (auto* id = dynamic_cast<const IdentExpr*>(condRhs)) {
             if (id->name == varName && extractIntConstant(condBin->lhs.get(), condConst)) {
                 switch (op) {
                     case BinaryOp::Lt: op = BinaryOp::Gt; break;
@@ -552,9 +569,13 @@ bool IRGen::tryGetConstantTripCount(const ForStmt& stmt, int64_t& tripCount, int
     // 3. Step: i = i + step or i = i - step
     const AssignStmt* stepAssign = dynamic_cast<const AssignStmt*>(stmt.step.get());
     if (!stepAssign) return false;
-    auto* stepTarget = dynamic_cast<const IdentExpr*>(stepAssign->target.get());
+    const Expr* stepTargetExpr = stepAssign->target.get();
+    while (auto* p = dynamic_cast<const ParenExpr*>(stepTargetExpr)) stepTargetExpr = p->subExpr.get();
+    auto* stepTarget = dynamic_cast<const IdentExpr*>(stepTargetExpr);
     if (!stepTarget || stepTarget->name != varName) return false;
-    auto* stepBin = dynamic_cast<const BinaryExpr*>(stepAssign->value.get());
+    const Expr* stepValExpr = stepAssign->value.get();
+    while (auto* p = dynamic_cast<const ParenExpr*>(stepValExpr)) stepValExpr = p->subExpr.get();
+    auto* stepBin = dynamic_cast<const BinaryExpr*>(stepValExpr);
     if (!stepBin) return false;
 
     int64_t stepVal = 0;
@@ -700,6 +721,10 @@ void IRGen::emitBlock(const BlockStmt& stmt, IRFunction& fn) {
 }
 
 void IRGen::emitCondition(const Expr& cond, const Label& trueLabel, const Label& falseLabel, IRFunction& fn) {
+    if (auto* paren = dynamic_cast<const ParenExpr*>(&cond)) {
+        emitCondition(*paren->subExpr, trueLabel, falseLabel, fn);
+        return;
+    }
     if (auto* bin = dynamic_cast<const BinaryExpr*>(&cond)) {
         if (bin->op == BinaryOp::And) {
             Label rhsLabel = fn.freshLabel("L_and_rhs");
@@ -847,6 +872,9 @@ VReg IRGen::emitShortCircuitValue(const BinaryExpr& expr, IRFunction& fn) {
 }
 
 VReg IRGen::emitExpr(const Expr& expr, IRFunction& fn) {
+    if (auto* paren = dynamic_cast<const ParenExpr*>(&expr)) {
+        return emitExpr(*paren->subExpr, fn);
+    }
     if (auto* intLit = dynamic_cast<const IntLiteralExpr*>(&expr)) {
         VReg r = fn.freshReg(IRType::S32);
         IRInst inst{IROp::LoadImm, r, 0, 0, IRType::S32};
@@ -1066,6 +1094,9 @@ VReg IRGen::emitMemberExpr(const MemberExpr& expr, IRFunction& fn) {
 }
 
 std::vector<VReg> IRGen::emitVectorExpr(const Expr& expr, IRFunction& fn) {
+    if (auto* paren = dynamic_cast<const ParenExpr*>(&expr)) {
+        return emitVectorExpr(*paren->subExpr, fn);
+    }
     if (auto* ident = dynamic_cast<const IdentExpr*>(&expr)) {
         const VarInfo* vInfo = getVar(ident->name);
         if (vInfo && vInfo->type.isVector()) {
@@ -1244,7 +1275,44 @@ VReg IRGen::emitCallExpr(const CallExpr& expr, IRFunction& fn) {
                     clamp = 31;
                 }
                 IRInst inst{op, dst, val, b, mask, valIRType};
-                inst.immInt = clamp;
+                if (expr.args.size() == 4) {
+                    if (auto* lit = dynamic_cast<const IntLiteralExpr*>(expr.args[3].get())) {
+                        int32_t width = static_cast<int32_t>(lit->value);
+                        inst.immInt = ((32 - width) << 8) | clamp;
+                    } else {
+                        // Dynamic width in register: c = ((32 - width) << 8) | clamp
+                        VReg widthReg = emitExpr(*expr.args[3], fn);
+                        VReg imm32 = fn.freshReg(IRType::S32);
+                        IRInst li32(IROp::LoadImm, imm32, 0, 0, IRType::S32);
+                        li32.immInt = 32;
+                        fn.emit(li32);
+
+                        VReg diff = fn.freshReg(IRType::S32);
+                        fn.emit(IRInst{IROp::Sub, diff, imm32, widthReg, IRType::S32});
+
+                        VReg imm8 = fn.freshReg(IRType::S32);
+                        IRInst li8(IROp::LoadImm, imm8, 0, 0, IRType::S32);
+                        li8.immInt = 8;
+                        fn.emit(li8);
+
+                        VReg seg = fn.freshReg(IRType::S32);
+                        fn.emit(IRInst{IROp::Shl, seg, diff, imm8, IRType::S32});
+
+                        VReg cReg = seg;
+                        if (clamp != 0) {
+                            VReg immClamp = fn.freshReg(IRType::S32);
+                            IRInst liClamp(IROp::LoadImm, immClamp, 0, 0, IRType::S32);
+                            liClamp.immInt = clamp;
+                            fn.emit(liClamp);
+
+                            cReg = fn.freshReg(IRType::S32);
+                            fn.emit(IRInst{IROp::Or, cReg, seg, immClamp, IRType::S32});
+                        }
+                        inst.src4 = cReg;
+                    }
+                } else {
+                    inst.immInt = clamp;
+                }
                 fn.emit(inst);
                 return dst;
             }
@@ -1258,7 +1326,10 @@ VReg IRGen::emitCallExpr(const CallExpr& expr, IRFunction& fn) {
         const Expr* cmpExpr = nullptr;
         const Expr* valExpr = nullptr;
 
-        if (auto* idx = dynamic_cast<const IndexExpr*>(expr.args[0].get())) {
+        const Expr* arg0 = expr.args[0].get();
+        while (auto* p = dynamic_cast<const ParenExpr*>(arg0)) arg0 = p->subExpr.get();
+
+        if (auto* idx = dynamic_cast<const IndexExpr*>(arg0)) {
             baseExpr = idx->base.get();
             indexExpr = idx->index.get();
             if (isCas) {
@@ -1268,7 +1339,7 @@ VReg IRGen::emitCallExpr(const CallExpr& expr, IRFunction& fn) {
                 valExpr = expr.args[1].get();
             }
         } else {
-            baseExpr = expr.args[0].get();
+            baseExpr = arg0;
             size_t maxArgs = isCas ? 4 : 3;
             if (expr.args.size() == maxArgs) {
                 indexExpr = expr.args[1].get();

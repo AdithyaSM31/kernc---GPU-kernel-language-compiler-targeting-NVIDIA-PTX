@@ -111,6 +111,20 @@ TEST(SemaTest, IntLiteralsBeyondS32Rejected) {
     }
 }
 
+TEST(SemaTest, ParenthesizedInt32MinRejected) {
+    // -(2147483648) must be rejected because (2147483648) is an isolated expression where
+    // 2147483648 overflows int32_t (following Java JLS 3.10.1 and C99 standards).
+    // In contrast, -2147483648 without intervening parentheses is valid INT32_MIN.
+    std::string src = "kernel test(int* o) {\n"
+                      "    o[0] = -(2147483648);\n"
+                      "}\n";
+    DiagnosticsEngine diag;
+    EXPECT_FALSE(checkSource(src, diag));
+    EXPECT_TRUE(diag.hasErrors());
+    EXPECT_NE(diag.formatAll().find("2:14: error: integer literal '2147483648' is out of range for type 'int'"),
+              std::string::npos) << diag.formatAll();
+}
+
 TEST(SemaTest, BareReturnAccepted) {
     std::string src = "kernel test(int* o, int n) {\n"
                       "    if (thread_idx >= n) return;\n"
@@ -435,8 +449,48 @@ TEST(SemaTest, WarpIntrinsicsArityMismatchesRejected) {
         {"kernel k() { int x = activemask(1, 2); }", "intrinsic 'activemask' expects 0 argument(s), got 2"},
         {"kernel k() { int x = __ballot_sync(-1); }", "intrinsic '__ballot_sync' expects 2 argument(s), got 1"},
         {"kernel k() { int x = ballot_sync(-1, 1, 2); }", "intrinsic 'ballot_sync' expects 2 argument(s), got 3"},
-        {"kernel k() { int x = __shfl_sync(-1, 1); }", "intrinsic '__shfl_sync' expects 3 argument(s), got 2"},
-        {"kernel k() { int x = shfl_down_sync(-1, 1, 2, 3); }", "intrinsic 'shfl_down_sync' expects 3 argument(s), got 4"},
+        {"kernel k() { int x = __shfl_sync(-1, 1); }", "intrinsic '__shfl_sync' expects 3 or 4 argument(s), got 2"},
+        {"kernel k() { int x = shfl_down_sync(-1, 1, 2, 3, 4); }", "intrinsic 'shfl_down_sync' expects 3 or 4 argument(s), got 5"},
+    };
+
+    for (const auto& tc : cases) {
+        DiagnosticsEngine diag;
+        EXPECT_FALSE(checkSource(tc.src, diag)) << tc.src;
+        EXPECT_NE(diag.formatAll().find(tc.expectedErr), std::string::npos)
+            << "Expected: " << tc.expectedErr << "\nGot: " << diag.formatAll();
+    }
+}
+
+TEST(SemaTest, WarpShuffleWithWidthAccepted) {
+    std::string src = "kernel test(int* out_i, float* out_f, int* in_i, float* in_f) {\n"
+                      "    int mask = __activemask();\n"
+                      "    int val_i = in_i[thread_idx];\n"
+                      "    float val_f = in_f[thread_idx];\n"
+                      "    out_i[0] = __shfl_down_sync(mask, val_i, 1, 32);\n"
+                      "    out_i[1] = shfl_down_sync(mask, val_i, 1, 16);\n"
+                      "    out_i[2] = __shfl_up_sync(mask, val_i, 1, 8);\n"
+                      "    out_i[3] = shfl_up_sync(mask, val_i, 1, 4);\n"
+                      "    out_i[4] = __shfl_xor_sync(mask, val_i, 1, 2);\n"
+                      "    out_i[5] = shfl_sync(mask, val_i, 0, 16);\n"
+                      "    out_f[0] = __shfl_down_sync(mask, val_f, 1, 16);\n"
+                      "    out_f[1] = shfl_up_sync(mask, val_f, 1, 8);\n"
+                      "}\n";
+    DiagnosticsEngine diag;
+    bool ok = checkSource(src, diag);
+    EXPECT_TRUE(ok) << diag.formatAll();
+    EXPECT_FALSE(diag.hasErrors());
+}
+
+TEST(SemaTest, WarpShuffleInvalidWidthRejected) {
+    struct TestCase {
+        std::string src;
+        std::string expectedErr;
+    };
+    std::vector<TestCase> cases = {
+        {"kernel k() { int x = __shfl_down_sync(-1, 1, 1, 1.5); }", "argument 4 ('width') of '__shfl_down_sync' must be 'int', got 'float'"},
+        {"kernel k() { int x = __shfl_down_sync(-1, 1, 1, 10); }", "argument 4 ('width') of '__shfl_down_sync' must be a power of two between 2 and 32 (got 10)"},
+        {"kernel k() { int x = __shfl_down_sync(-1, 1, 1, 64); }", "argument 4 ('width') of '__shfl_down_sync' must be a power of two between 2 and 32 (got 64)"},
+        {"kernel k() { int x = __shfl_down_sync(-1, 1, 1, 1); }", "argument 4 ('width') of '__shfl_down_sync' must be a power of two between 2 and 32 (got 1)"},
     };
 
     for (const auto& tc : cases) {

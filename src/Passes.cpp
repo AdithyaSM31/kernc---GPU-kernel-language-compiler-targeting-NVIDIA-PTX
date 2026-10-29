@@ -639,6 +639,7 @@ bool Optimizer::runDeadCodeElimination(IRFunction& fn) {
                 if (inst.src1 != 0) useCount[inst.src1]++;
                 if (inst.src2 != 0) useCount[inst.src2]++;
                 if (inst.src3 != 0) useCount[inst.src3]++;
+                if (inst.src4 != 0) useCount[inst.src4]++;
                 for (VReg arg : inst.args) {
                     if (arg != 0) useCount[arg]++;
                 }
@@ -740,6 +741,7 @@ static void getUses(const IRInst& inst, std::vector<VReg>& uses) {
     if (inst.src1 != 0) uses.push_back(inst.src1);
     if (inst.src2 != 0) uses.push_back(inst.src2);
     if (inst.src3 != 0) uses.push_back(inst.src3);
+    if (inst.src4 != 0) uses.push_back(inst.src4);
     for (VReg a : inst.args) {
         if (a != 0) uses.push_back(a);
     }
@@ -1197,6 +1199,13 @@ bool Optimizer::runCSE(IRFunction& fn) {
                     changedOverall = true;
                 }
             }
+            if (inst.src4 != 0) {
+                VReg root = getRoot(inst.src4);
+                if (root != inst.src4 && fn.regType(root) == fn.regType(inst.src4)) {
+                    inst.src4 = root;
+                    changedOverall = true;
+                }
+            }
             for (auto& a : inst.args) {
                 if (a != 0) {
                     VReg root = getRoot(a);
@@ -1249,6 +1258,7 @@ bool Optimizer::runCSE(IRFunction& fn) {
                     inst.src1 = availReg;
                     inst.src2 = 0;
                     inst.src3 = 0;
+                    inst.src4 = 0;
                     inst.immInt = 0;
                     inst.immFloat = 0.0f;
                     inst.symbol.clear();
@@ -1258,7 +1268,7 @@ bool Optimizer::runCSE(IRFunction& fn) {
                     continue;
                 } else {
                     killRegister(inst.dst);
-                    if (inst.dst != inst.src1 && inst.dst != inst.src2 && inst.dst != inst.src3) {
+                    if (inst.dst != inst.src1 && inst.dst != inst.src2 && inst.dst != inst.src3 && inst.dst != inst.src4) {
                         availExprs[key] = inst.dst;
                     }
                 }
@@ -1791,6 +1801,7 @@ static bool inlineCall(IRFunction& caller, size_t blockIdx, size_t instIdx, cons
             if (newInst.src1 != 0) newInst.src1 = vregMap[newInst.src1];
             if (newInst.src2 != 0) newInst.src2 = vregMap[newInst.src2];
             if (newInst.src3 != 0) newInst.src3 = vregMap[newInst.src3];
+            if (newInst.src4 != 0) newInst.src4 = vregMap[newInst.src4];
             for (auto& d : newInst.dsts) d = vregMap[d];
             for (auto& a : newInst.args) a = vregMap[a];
             if (!newInst.trueTarget.empty()) {

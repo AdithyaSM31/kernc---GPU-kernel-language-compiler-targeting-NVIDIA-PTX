@@ -108,10 +108,10 @@ All built-in identifiers evaluate to 32-bit signed integer values (`int`). Their
 
 ### Warp-Level Intrinsics
 `kernc` provides warp-level communication and synchronization primitives allowing threads within a 32-lane warp to exchange data and vote without accessing shared or global memory. All intrinsics are available both with and without the `__` prefix:
-- `__shfl_sync(mask, val, src_lane)` / `shfl_sync(...)`: broadcast from lane `src_lane` -> `shfl.sync.idx.b32 d, a, b, 31, member_mask;`
-- `__shfl_down_sync(mask, val, delta)` / `shfl_down_sync(...)`: shift down by `delta` lanes -> `shfl.sync.down.b32 d, a, b, 31, member_mask;`
-- `__shfl_up_sync(mask, val, delta)` / `shfl_up_sync(...)`: shift up by `delta` lanes -> `shfl.sync.up.b32 d, a, b, 0, member_mask;`
-- `__shfl_xor_sync(mask, val, lane_mask)` / `shfl_xor_sync(...)`: butterfly exchange -> `shfl.sync.bfly.b32 d, a, b, 31, member_mask;`
+- `__shfl_sync(mask, val, src_lane, [width])` / `shfl_sync(...)`: broadcast from lane `src_lane` -> `shfl.sync.idx.b32 d, a, b, c, member_mask;`
+- `__shfl_down_sync(mask, val, delta, [width])` / `shfl_down_sync(...)`: shift down by `delta` lanes -> `shfl.sync.down.b32 d, a, b, c, member_mask;`
+- `__shfl_up_sync(mask, val, delta, [width])` / `shfl_up_sync(...)`: shift up by `delta` lanes -> `shfl.sync.up.b32 d, a, b, c, member_mask;`
+- `__shfl_xor_sync(mask, val, lane_mask, [width])` / `shfl_xor_sync(...)`: butterfly exchange -> `shfl.sync.bfly.b32 d, a, b, c, member_mask;`
 - `__ballot_sync(mask, predicate)` / `ballot_sync(...)`: 32-bit warp ballot -> `vote.sync.ballot.b32 d, pred, member_mask;`
 - `__activemask()` / `activemask()`: returns 32-bit active lane mask -> `activemask.b32 d;`
 
@@ -119,6 +119,7 @@ Type rules in `Sema`:
 - `mask`: `int` (32-bit member mask).
 - `val`: `int` or `float` (return type matches `val`).
 - `delta` / `src_lane` / `lane_mask`: `int`.
+- `width` (optional 4th argument, defaults to 32): `int`. If a constant literal, it must be a power of two in the range $[2, 32]$ ($2, 4, 8, 16, 32$). Any non-power-of-two, negative, zero, or $>32$ literal is rejected with a compile-time diagnostic.
 - `predicate`: `bool` or `int` (evaluated/converted to `.pred`).
 - `activemask`: 0 arguments, returns `int`.
 - Pointer types and `bool` values as shuffle payloads are rejected with compile-time diagnostics.

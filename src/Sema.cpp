@@ -23,6 +23,9 @@ void Sema::exitScope() {
 }
 
 bool Sema::isExprDivergent(const Expr& expr) const {
+    if (auto* p = dynamic_cast<const ParenExpr*>(&expr)) {
+        return isExprDivergent(*p->subExpr);
+    }
     if (auto* b = dynamic_cast<const BuiltinExpr*>(&expr)) {
         return b->builtin == BuiltinKind::ThreadIdxX ||
                b->builtin == BuiltinKind::ThreadIdxY ||
@@ -248,7 +251,9 @@ void Sema::checkStmt(Stmt& stmt) {
     } else if (auto* block = dynamic_cast<BlockStmt*>(&stmt)) {
         checkBlock(*block);
     } else if (auto* exprStmt = dynamic_cast<ExprStmt*>(&stmt)) {
-        if (auto* call = dynamic_cast<CallExpr*>(exprStmt->expr.get())) {
+        Expr* inner = exprStmt->expr.get();
+        while (auto* p = dynamic_cast<ParenExpr*>(inner)) inner = p->subExpr.get();
+        if (auto* call = dynamic_cast<CallExpr*>(inner)) {
             checkCallExpr(*call, /*isExprStmt=*/true);
         } else {
             checkExpr(*exprStmt->expr);
@@ -347,7 +352,10 @@ void Sema::checkVarDecl(VarDeclStmt& stmt) {
 }
 
 void Sema::checkAssign(AssignStmt& stmt) {
-    if (auto* ident = dynamic_cast<IdentExpr*>(stmt.target.get())) {
+    Expr* target = stmt.target.get();
+    while (auto* p = dynamic_cast<ParenExpr*>(target)) target = p->subExpr.get();
+
+    if (auto* ident = dynamic_cast<IdentExpr*>(target)) {
         const Type* t = symTable_.lookup(ident->name);
         if (t && t->isSharedArray()) {
             diag_.error(stmt.target->range.begin, "cannot assign to shared array '" + ident->name +
@@ -357,7 +365,7 @@ void Sema::checkAssign(AssignStmt& stmt) {
     }
 
     Type targetType = Type::makeVoid();
-    if (auto* ident = dynamic_cast<IdentExpr*>(stmt.target.get())) {
+    if (auto* ident = dynamic_cast<IdentExpr*>(target)) {
         const Type* t = symTable_.lookup(ident->name);
         if (!t) {
             diag_.error(ident->range.begin, "undeclared variable '" + ident->name + "'");
@@ -365,18 +373,18 @@ void Sema::checkAssign(AssignStmt& stmt) {
         }
         targetType = *t;
     } else {
-        targetType = checkExpr(*stmt.target);
+        targetType = checkExpr(*target);
     }
     Type valueType = checkExpr(*stmt.value);
 
     if (targetType.isVoid() || valueType.isVoid()) return;
 
     // Check lvalue requirement
-    if (auto* builtin = dynamic_cast<BuiltinExpr*>(stmt.target.get())) {
+    if (auto* builtin = dynamic_cast<BuiltinExpr*>(target)) {
         diag_.error(stmt.target->range.begin, "cannot assign to built-in '" + builtin->name() + "'");
         return;
     }
-    if (auto* ident = dynamic_cast<IdentExpr*>(stmt.target.get())) {
+    if (auto* ident = dynamic_cast<IdentExpr*>(target)) {
         if (targetType.isPtr()) {
             diag_.error(stmt.target->range.begin, "cannot assign to pointer variable '" + ident->name + "'");
             return;
@@ -387,11 +395,13 @@ void Sema::checkAssign(AssignStmt& stmt) {
         } else {
             divergentVars_.erase(ident->name);
         }
-    } else if (dynamic_cast<IndexExpr*>(stmt.target.get())) {
+    } else if (dynamic_cast<IndexExpr*>(target)) {
         // Valid lvalue: ptr[i]
-    } else if (auto* mem = dynamic_cast<MemberExpr*>(stmt.target.get())) {
+    } else if (auto* mem = dynamic_cast<MemberExpr*>(target)) {
         // Valid lvalue: v.x or ptr[i].x
-        if (dynamic_cast<BuiltinExpr*>(mem->base.get())) {
+        const Expr* base = mem->base.get();
+        while (auto* p = dynamic_cast<const ParenExpr*>(base)) base = p->subExpr.get();
+        if (dynamic_cast<const BuiltinExpr*>(base)) {
             diag_.error(mem->range.begin, "cannot assign to built-in component");
             return;
         }
@@ -496,6 +506,10 @@ void Sema::checkBlock(BlockStmt& stmt) {
 }
 
 Type Sema::checkExpr(Expr& expr) {
+    if (auto* paren = dynamic_cast<ParenExpr*>(&expr)) {
+        expr.resolvedType = checkExpr(*paren->subExpr);
+        return expr.resolvedType;
+    }
     if (auto* lit = dynamic_cast<IntLiteralExpr*>(&expr)) {
         return checkIntLiteral(*lit, /*negated=*/false);
     }
@@ -572,8 +586,8 @@ Type Sema::checkCallExpr(CallExpr& expr, bool isExprStmt) {
             case WarpIntrinsic::ShflDownSync:
             case WarpIntrinsic::ShflUpSync:
             case WarpIntrinsic::ShflXorSync: {
-                if (expr.args.size() != 3) {
-                    diag_.error(expr.range.begin, "intrinsic '" + expr.callee + "' expects 3 argument(s), got " +
+                if (expr.args.size() != 3 && expr.args.size() != 4) {
+                    diag_.error(expr.range.begin, "intrinsic '" + expr.callee + "' expects 3 or 4 argument(s), got " +
                                 std::to_string(expr.args.size()));
                     for (auto& a : expr.args) checkExpr(*a);
                     expr.resolvedType = Type::makeInt();
@@ -593,6 +607,20 @@ Type Sema::checkCallExpr(CallExpr& expr, bool isExprStmt) {
                 if (!arg3Ty.isVoid() && !arg3Ty.isInt()) {
                     diag_.error(expr.args[2]->range.begin, "argument 3 of '" + expr.callee +
                                 "' must be 'int', got '" + arg3Ty.toString() + "'");
+                }
+                if (expr.args.size() == 4) {
+                    Type widthTy = checkExpr(*expr.args[3]);
+                    if (!widthTy.isVoid() && !widthTy.isInt()) {
+                        diag_.error(expr.args[3]->range.begin, "argument 4 ('width') of '" + expr.callee +
+                                    "' must be 'int', got '" + widthTy.toString() + "'");
+                    }
+                    if (auto* lit = dynamic_cast<IntLiteralExpr*>(expr.args[3].get())) {
+                        int64_t w = lit->value;
+                        if (w != 2 && w != 4 && w != 8 && w != 16 && w != 32) {
+                            diag_.error(expr.args[3]->range.begin, "argument 4 ('width') of '" + expr.callee +
+                                        "' must be a power of two between 2 and 32 (got " + std::to_string(w) + ")");
+                        }
+                    }
                 }
                 expr.resolvedType = valTy.isFloat() ? Type::makeFloat() : Type::makeInt();
                 return expr.resolvedType;
@@ -614,7 +642,10 @@ Type Sema::checkCallExpr(CallExpr& expr, bool isExprStmt) {
             return expr.resolvedType;
         }
 
-        bool arg0IsIndex = dynamic_cast<IndexExpr*>(expr.args[0].get()) != nullptr;
+        Expr* arg0 = expr.args[0].get();
+        while (auto* p = dynamic_cast<ParenExpr*>(arg0)) arg0 = p->subExpr.get();
+
+        bool arg0IsIndex = dynamic_cast<IndexExpr*>(arg0) != nullptr;
         if (expr.args.size() == maxArgs && arg0IsIndex) {
             diag_.error(expr.range.begin, "intrinsic '" + expr.callee + "' with subscripted pointer expects " +
                         std::to_string(minArgs) + " argument(s), got " + std::to_string(maxArgs));
@@ -634,14 +665,14 @@ Type Sema::checkCallExpr(CallExpr& expr, bool isExprStmt) {
         };
 
         Type pointeeType = Type::makeVoid();
-        if (auto* idxExpr = dynamic_cast<IndexExpr*>(expr.args[0].get())) {
+        if (auto* idxExpr = dynamic_cast<IndexExpr*>(arg0)) {
             pointeeType = checkIndexExpr(*idxExpr);
             if (!pointeeType.isVoid() && !pointeeType.isInt() && !pointeeType.isFloat()) {
                 return rejectVectorTarget(pointeeType.toString());
             }
         } else {
             Type ptrTy = Type::makeVoid();
-            if (auto* ident = dynamic_cast<IdentExpr*>(expr.args[0].get())) {
+            if (auto* ident = dynamic_cast<IdentExpr*>(arg0)) {
                 ptrTy = checkIdentExpr(*ident, /*allowSharedArray=*/true);
             } else {
                 ptrTy = checkExpr(*expr.args[0]);
@@ -1066,7 +1097,9 @@ Type Sema::checkUnaryExpr(UnaryExpr& expr) {
 }
 
 Type Sema::checkIndexExpr(IndexExpr& expr) {
-    auto* baseIdent = dynamic_cast<IdentExpr*>(expr.base.get());
+    Expr* base = expr.base.get();
+    while (auto* p = dynamic_cast<ParenExpr*>(base)) base = p->subExpr.get();
+    auto* baseIdent = dynamic_cast<IdentExpr*>(base);
     Type baseType = baseIdent ? checkIdentExpr(*baseIdent, /*allowSharedArray=*/true)
                               : checkExpr(*expr.base);
     Type indexType = checkExpr(*expr.index);

@@ -257,6 +257,14 @@ struct CastExpr : public Expr {
     }
 };
 
+// Parenthesized expression: preserves syntax grouping in the AST so that integer literal
+// range validation and source locations adhere strictly to C99 and Java JLS 3.10.1 rules.
+struct ParenExpr : public Expr {
+    std::unique_ptr<Expr> subExpr;
+    explicit ParenExpr(std::unique_ptr<Expr> sub)
+        : subExpr(std::move(sub)) {}
+};
+
 enum class WarpIntrinsic {
     ShflSync,
     ShflDownSync,

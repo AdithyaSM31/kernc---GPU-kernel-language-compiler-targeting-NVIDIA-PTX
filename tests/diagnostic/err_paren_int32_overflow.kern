@@ -1,0 +1,4 @@
+// Expected error: 3:14: error: integer literal '2147483648' is out of range for type 'int'
+kernel test(int* o) {
+    o[0] = -(2147483648);
+}

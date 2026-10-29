@@ -1718,6 +1718,71 @@ TEST_F(KernelE2ETest, WarpIntrinsicsMatchCpu) {
     }
 }
 
+TEST_F(KernelE2ETest, WarpShuffleSubWarpWidthMatchesCpu) {
+    std::string src =
+        "kernel test_warp_width(int* out_down16, int* out_xor8, int* in) {\n"
+        "    int tid = thread_idx;\n"
+        "    int val = in[tid];\n"
+        "    out_down16[tid] = __shfl_down_sync(0xFFFFFFFF, val, 1, 16);\n"
+        "    out_xor8[tid] = __shfl_xor_sync(0xFFFFFFFF, val, 1, 8);\n"
+        "}\n";
+
+    for (bool optimize : {false, true}) {
+        std::string optName = optimize ? "-O1" : "-O0";
+        std::string ptx = compileSourceToPTX(src, optimize);
+        ASSERT_FALSE(ptx.empty()) << optName;
+
+        CUmodule mod = loadPTX(ptx);
+        ASSERT_NE(mod, nullptr) << optName;
+
+        CUfunction func = nullptr;
+        CHECK_CUDA(cuModuleGetFunction(&func, mod, "test_warp_width"));
+
+        const int kWarpSize = 32;
+        std::vector<int32_t> h_in(kWarpSize);
+        for (int i = 0; i < kWarpSize; ++i) h_in[i] = 100 + i;
+
+        size_t sizeBytes = kWarpSize * sizeof(int32_t);
+        CUdeviceptr d_in, d_down16, d_xor8;
+        CHECK_CUDA(cuMemAlloc(&d_in, sizeBytes));
+        CHECK_CUDA(cuMemAlloc(&d_down16, sizeBytes));
+        CHECK_CUDA(cuMemAlloc(&d_xor8, sizeBytes));
+
+        CHECK_CUDA(cuMemcpyHtoD(d_in, h_in.data(), sizeBytes));
+
+        void* args[] = { &d_down16, &d_xor8, &d_in };
+        CHECK_CUDA(cuLaunchKernel(func, 1, 1, 1, kWarpSize, 1, 1, 0, 0, args, 0));
+        CHECK_CUDA(cuCtxSynchronize());
+
+        std::vector<int32_t> h_down16(kWarpSize, 0);
+        std::vector<int32_t> h_xor8(kWarpSize, 0);
+        CHECK_CUDA(cuMemcpyDtoH(h_down16.data(), d_down16, sizeBytes));
+        CHECK_CUDA(cuMemcpyDtoH(h_xor8.data(), d_xor8, sizeBytes));
+
+        // Sub-warp width 16 down-shuffle:
+        // In sub-warp 0 (lanes 0..15): lane i gets lane i+1, lane 15 clamps to lane 15
+        // In sub-warp 1 (lanes 16..31): lane i gets lane i+1, lane 31 clamps to lane 31
+        for (int i = 0; i < kWarpSize; ++i) {
+            int subwarp_base = (i / 16) * 16;
+            int subwarp_lane = i % 16;
+            int target_lane = (subwarp_lane + 1 < 16) ? subwarp_base + subwarp_lane + 1 : i;
+            EXPECT_EQ(h_down16[i], h_in[target_lane]) << optName << " down16 lane " << i;
+        }
+
+        // Sub-warp width 8 xor-shuffle:
+        // Each 8-lane sub-warp exchanges lane with lane ^ 1
+        for (int i = 0; i < kWarpSize; ++i) {
+            int target_lane = i ^ 1;
+            EXPECT_EQ(h_xor8[i], h_in[target_lane]) << optName << " xor8 lane " << i;
+        }
+
+        cuMemFree(d_in);
+        cuMemFree(d_down16);
+        cuMemFree(d_xor8);
+        cuModuleUnload(mod);
+    }
+}
+
 TEST_F(KernelE2ETest, AtomicOperationsMatchCpu) {
     std::string src =
         "func int dev_atomic_add(int* p, int val) {\n"

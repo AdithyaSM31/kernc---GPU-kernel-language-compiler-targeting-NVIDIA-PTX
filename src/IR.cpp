@@ -150,7 +150,10 @@ std::string IRInst::toString() const {
         case IROp::ShflDown:
         case IROp::ShflBfly:
         case IROp::ShflUp:
-            ss << "%v" << src1 << ", %v" << src2 << ", " << immInt << ", %v" << src3;
+            ss << "%v" << src1 << ", %v" << src2 << ", ";
+            if (src4 != 0) ss << "%v" << src4;
+            else ss << immInt;
+            ss << ", %v" << src3;
             break;
         case IROp::VoteBallot:
             ss << "%v" << src1 << ", %v" << src2;

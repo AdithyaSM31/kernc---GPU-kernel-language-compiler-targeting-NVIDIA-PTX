@@ -7,11 +7,11 @@
 ### 1. Unit Tests (GoogleTest)
 - `tests/unit/lexer_test.cpp`: Keywords, numeric formats (int/hex/float), source locations, comments.
 - `tests/unit/parser_test.cpp`: Precedence climbing, associativity, casts, unary, control flow AST.
-- `tests/unit/sema_test.cpp`: Type checker, scope stack, promotion, diagnostic error triggers, definite-assignment warnings, barrier-divergence warnings, and call argument type checking under arity mismatches.
-- `tests/unit/ir_pass_test.cpp`: Branch threading, constant folding, dead code elimination, instruction scheduling, inter-procedural inlining / call graph analysis, local Common Subexpression Elimination (CSE) & copy propagation with non-SSA kill and memory aliasing validation, CFG cleanup (unreachable block pruning, fallthrough branch folding, trampoline redirection, single-predecessor block merging), and power-of-two and non-power-of-two signed division/modulo strength reduction (Granlund–Montgomery / Hacker's Delight magic numbers).
+- `tests/unit/sema_test.cpp`: Type checker, scope stack, promotion, diagnostic error triggers, parenthesized INT32_MIN overflow diagnostics, definite-assignment warnings, barrier-divergence warnings, warp shuffle sub-warp width checks, and call argument type checking under arity mismatches.
+- `tests/unit/ir_pass_test.cpp`: Branch threading, constant folding, dead code elimination, instruction scheduling, inter-procedural inlining / call graph analysis, local Common Subexpression Elimination (CSE) & copy propagation with non-SSA kill and memory aliasing validation, CFG cleanup (unreachable block pruning, fallthrough branch folding, trampoline redirection, single-predecessor block merging), power-of-two and non-power-of-two signed division/modulo strength reduction (Granlund–Montgomery / Hacker's Delight magic numbers), and warp shuffle sub-warp width PTX operand encoding.
 
 ### 2. Negative Diagnostic Tests
-- Located in `tests/diagnostic/err_*.kern` (9 test files).
+- Located in `tests/diagnostic/err_*.kern` (10 test files).
 - Verified automatically by `tests/diagnostic/run_diagnostic_tests.py`.
 - Checks that erroneous programs fail compilation with precise line, column, and diagnostic messages.
 
@@ -37,7 +37,7 @@
     - `saxpy`: Scaled vector addition with float constant.
     - `clamp`: Branching clamping within $[min, max]$.
     - `relu`: Branching ReLU $\max(0, x)$.
-    - `reduce`: Tree reduction using shared memory and barriers.
+    - `reduce`: Tree reduction using shared memory and barriers, plus warp-level intrinsics (butterfly shuffle, down shuffle with sub-warp widths 16 and 8, warp ballot, activemask).
     - `functions`: Device functions with recursion, mutual recursion, float/bool/pointer args and returns, plus nested multi-level inlining and multiple early returns.
     - `cse`: Redundant address arithmetic, duplicate loads, commutative expressions, and aliasing buffers where stores clobber subsequent reads.
     - `div_mod`: Strength reduction of signed division and modulo by constant powers of two and non-powers of two ($d \notin \{0, \pm 1, \mathrm{INT\_MIN}\}$) using Granlund–Montgomery magic numbers, verified bit-for-bit across `-O0` (hardware `div.s32`), `-O1`, and CPU references.

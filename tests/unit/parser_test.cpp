@@ -98,6 +98,23 @@ TEST(ParserTest, LeftAssociativity) {
     EXPECT_EQ(cIdent->name, "c");
 }
 
+TEST(ParserTest, ParenthesizedExprPreservedInAST) {
+    std::string src = "kernel test() { int x = (42); }";
+    auto k = parseKernel(src);
+    ASSERT_NE(k, nullptr);
+    ASSERT_EQ(k->body.size(), 1u);
+
+    auto* decl = dynamic_cast<VarDeclStmt*>(k->body[0].get());
+    ASSERT_NE(decl, nullptr);
+
+    auto* paren = dynamic_cast<ParenExpr*>(decl->init.get());
+    ASSERT_NE(paren, nullptr);
+
+    auto* lit = dynamic_cast<IntLiteralExpr*>(paren->subExpr.get());
+    ASSERT_NE(lit, nullptr);
+    EXPECT_EQ(lit->value, 42);
+}
+
 TEST(ParserTest, IndexAndCastExpr) {
     std::string src = "kernel test(float* p) { float y = cast<float>(p[1]); }";
     auto k = parseKernel(src);

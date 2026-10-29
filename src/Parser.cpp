@@ -640,8 +640,12 @@ std::unique_ptr<Expr> Parser::parsePrimary() {
         call->range = {tok.loc, endLoc};
         expr = std::move(call);
     } else if (match(TokenKind::LParen)) {
-        expr = parseExpr();
-        consume(TokenKind::RParen, "expected ')' after expression");
+        auto sub = parseExpr();
+        if (!sub) return nullptr;
+        Token rparen = consume(TokenKind::RParen, "expected ')' after expression");
+        auto paren = std::make_unique<ParenExpr>(std::move(sub));
+        paren->range = {startLoc, rparen.loc};
+        expr = std::move(paren);
     } else {
         diag_.error(current_.loc, "expected expression");
         hasError_ = true;

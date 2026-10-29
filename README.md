@@ -24,7 +24,7 @@ What it supports:
 - Vector component access (`.x`, `.y`, `.z`, `.w`), constructors (`int2(...)`, `make_float4(...)`, etc.) with implicit int-to-float promotion, and 64/128-bit vector memory operations (`ld.global.v2/v4`, `st.global.v2/v4`, `ld.shared.v2/v4`, `st.shared.v2/v4`) lowering to hardware SASS `LDG.E.64/128`, `STG.E.64/128`, `LDS.64/128`, `STS.64/128`
 - Vector intrinsics (`load_int2/4`, `load_float2/4`, `store_int2/4`, `store_float2/4`) on scalar and vector buffers
 - 1D, 2D, and 3D execution geometry (`thread_idx[_x|_y|_z]`, `block_idx_*`, `block_dim_*`, `grid_dim_*`, or `.x/.y/.z`)
-- warp-level intrinsics (`shfl_sync`, `shfl_down_sync`, `shfl_up_sync`, `shfl_xor_sync`, `ballot_sync`, `activemask`, with and without `__`)
+- warp-level intrinsics (`shfl_sync`, `shfl_down_sync`, `shfl_up_sync`, `shfl_xor_sync` with optional 4th sub-warp width argument, `ballot_sync`, `activemask`, with and without `__`)
 - atomic memory operations on global and shared memory (`atom.global`, `atom.shared` for `add`, `sub`, `min`, `max`, `and`, `or`, `xor`, `exch`, `cas`)
 - device functions (`func`), including recursion and mutual recursion
 - `if` / `else`, `while`, `for`, `return`, `barrier()`
@@ -35,7 +35,7 @@ What it supports:
 - `.file` / `.loc` source line info with `-lineinfo`
 - diagnostics with `file:line:column` and a caret
 
-The suite has 184 tests, and all of them pass, both in a normal build and under
+The suite has 202 tests, and all of them pass, both in a normal build and under
 UndefinedBehaviorSanitizer.
 
 ---
@@ -393,6 +393,9 @@ the right lines.
 `2147483648`, which doesn't fit in an `int` on its own. C handles this by giving the literal a
 wider type, but kernc has no wider type, so it uses Java's rule from JLS §3.10.1. The check
 runs in Sema, not the lexer, because only Sema can see the surrounding unary minus.
+Parentheses are preserved in the AST via `ParenExpr`: standalone `-(2147483648)` isolates `(2147483648)`
+as a positive subexpression that exceeds `INT32_MAX` and is rejected with an out-of-range diagnostic,
+exactly like Java and C.
 
 **9. Device functions use PTX's abstract calling convention.** A call stores its arguments
 into scoped `.param` variables and runs `call ($ret), f, ($arg0, ...)`; ptxas lowers this onto
@@ -442,9 +445,9 @@ Emitted IR frequently contains dead basic blocks after return instructions (`$L_
 
 | Suite | Count | What it checks |
 |---|---|---|
-| Unit tests (GoogleTest) | 132 | Lexer 9, parser 15, Sema 37 (accept/reject, type/arity rules, definite assignment & barrier divergence warnings, diagnostic locations), IR, passes, scheduling, inlining, CSE, CFG cleanup & non-power-of-two magic division 71 |
-| GPU end-to-end (Driver API) | 30 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
-| Diagnostics | 1 suite, 9 files | `tests/diagnostic/err_*.kern` must fail with the expected message (and location, where given) |
+| Unit tests (GoogleTest) | 137 | Lexer 9, parser 16 (including AST ParenExpr preservation), Sema 40 (accept/reject, type/arity rules, warp shuffle sub-warp width checks, parenthesized INT32_MIN overflow diagnostics, definite assignment & barrier divergence warnings, diagnostic locations), IR, passes, scheduling, inlining, CSE, CFG cleanup & non-power-of-two magic division 72 |
+| GPU end-to-end (Driver API) | 31 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
+| Diagnostics | 1 suite, 10 files | `tests/diagnostic/err_*.kern` must fail with the expected message (and location, where given) |
 | ptxas acceptance | 6 | Every file in `examples/` assembles with `ptxas -arch=sm_86` |
 | ptxas regression | 24 | `tests/regress/*.kern` (12 kernels) assemble at both `-O0` and `-O1` |
 | Line tables | 2 | `kernc -lineinfo` → ptxas → `nvdisasm --print-line-info`; each `//@ REGEX` line must own matching SASS |
@@ -458,7 +461,7 @@ The GPU tests cover:
 - 13 kinds of `bool` expression, with NaN and `-0.0` inputs;
 - a block reverse through shared memory;
 - the shipped reduction example, for 1 to 2²⁰+3 elements;
-- warp-level tree reduction (`__shfl_down_sync` / `shfl_down_sync` with offsets 16, 8, 4, 2, 1), butterfly exchange (`__shfl_xor_sync` / `shfl_xor_sync`), broadcast (`__shfl_sync` / `shfl_sync`), warp ballot (`__ballot_sync` bool predicate, `ballot_sync` int predicate), active mask (`__activemask` / `activemask`), and shift up (`__shfl_up_sync` / `shfl_up_sync`) for `int` and `float` at `-O0` and `-O1` vs CPU reference;
+- warp-level tree reduction (`__shfl_down_sync` / `shfl_down_sync` with offsets 16, 8, 4, 2, 1), butterfly exchange (`__shfl_xor_sync` / `shfl_xor_sync`), broadcast (`__shfl_sync` / `shfl_sync`), sub-warp shuffle segmentation (widths 16, 8, 4, 2), warp ballot (`__ballot_sync` bool predicate, `ballot_sync` int predicate), active mask (`__activemask` / `activemask`), and shift up (`__shfl_up_sync` / `shfl_up_sync`) for `int` and `float` at `-O0` and `-O1` vs CPU reference;
 - atomic memory operations under heavy contention across 4096 parallel threads (16 blocks of 256 threads) verifying exact global and shared memory results (`atomic_add` int/float, `atomic_sub`, `atomic_min`, `atomic_max`, `atomic_or`, `atomic_and`, `atomic_xor`, `atomic_exch` int/float, and single-winner `atomic_cas`) at `-O0` and `-O1` vs CPU reference;
 - device functions (`examples/functions.kern`, plus nested multi-level inlining, multi-return branching, and mutual recursion cycles), with float, bool, pointer and void calls at `-O0` and `-O1`;
 - functions and arrays named like kernc's old generated PTX names (`entry`, `L_then_0`,
@@ -525,7 +528,7 @@ Every fix is in the commit history, together with a test that failed before the 
 ## Limitations and next steps
 
 - **Not yet supported:** structs, 64-bit integer types other than pointers, and `bool` kernel parameters.
-- **Line info is per statement**, not per expression. Also, `-(2147483648)` is accepted because parentheses aren't kept in the AST; Java rejects it.
+- **Line info is per statement**, not per expression.
 - **compute-sanitizer demo** needs administrator enablement on Windows via `EnableDebuggerInterface.bat` before memcheck can report faults against `.kern` lines under WSL2.
 
 ---

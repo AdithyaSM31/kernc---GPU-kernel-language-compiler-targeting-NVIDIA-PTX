@@ -756,6 +756,35 @@ TEST(IRPassTest, WarpIntrinsicsIROpsAndPTX) {
     EXPECT_NE(ptx.find(", 0, "), std::string::npos) << ptx;
 }
 
+TEST(IRPassTest, WarpShuffleWidthEmitsCorrectPTX) {
+    std::string src = "kernel test(int* out, int x) {\n"
+                      "    out[0] = __shfl_down_sync(-1, x, 1, 32);\n"
+                      "    out[1] = __shfl_down_sync(-1, x, 1, 16);\n"
+                      "    out[2] = __shfl_down_sync(-1, x, 1, 8);\n"
+                      "    out[3] = __shfl_down_sync(-1, x, 1, 4);\n"
+                      "    out[4] = __shfl_down_sync(-1, x, 1, 2);\n"
+                      "    out[5] = __shfl_up_sync(-1, x, 1, 16);\n"
+                      "    out[6] = __shfl_xor_sync(-1, x, 1, 16);\n"
+                      "    out[7] = __shfl_sync(-1, x, 0, 16);\n"
+                      "}\n";
+    auto fn = compileToIR(src);
+    PTXEmitter emitter;
+    std::string ptx = emitter.emitFunction(fn);
+
+    // width=32: c = (0 << 8) | 31 = 31
+    EXPECT_NE(ptx.find(", 31, "), std::string::npos) << ptx;
+    // width=16 down/xor/idx: c = (16 << 8) | 31 = 4127
+    EXPECT_NE(ptx.find(", 4127, "), std::string::npos) << ptx;
+    // width=8 down: c = (24 << 8) | 31 = 6175
+    EXPECT_NE(ptx.find(", 6175, "), std::string::npos) << ptx;
+    // width=4 down: c = (28 << 8) | 31 = 7199
+    EXPECT_NE(ptx.find(", 7199, "), std::string::npos) << ptx;
+    // width=2 down: c = (30 << 8) | 31 = 7711
+    EXPECT_NE(ptx.find(", 7711, "), std::string::npos) << ptx;
+    // width=16 up: c = (16 << 8) | 0 = 4096
+    EXPECT_NE(ptx.find(", 4096, "), std::string::npos) << ptx;
+}
+
 TEST(IRPassTest, WarpIntrinsicsNotPrunedByDCE) {
     std::string src = "kernel test_warp_dce(int val) {\n"
                       "    int m = __activemask();\n"
