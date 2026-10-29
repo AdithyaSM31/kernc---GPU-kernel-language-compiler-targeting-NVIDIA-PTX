@@ -1214,6 +1214,118 @@ TEST_F(KernelE2ETest, StrengthReducedDivModMatchesUnoptimizedGPU) {
     }
 }
 
+static std::vector<int32_t> runNonPowerOfTwoEdges(KernelE2ETest* fixture, bool optimize) {
+    const char* src =
+        "kernel test_non_power_of_two_div_mod(int* out, int* in, int n) {\n"
+        "    int i = block_idx * block_dim + thread_idx;\n"
+        "    if (i < n) {\n"
+        "        int v = in[i];\n"
+        "        int base = i * 24;\n"
+        "        out[base + 0] = v / 3;\n"
+        "        out[base + 1] = v / 5;\n"
+        "        out[base + 2] = v / 7;\n"
+        "        out[base + 3] = v / 10;\n"
+        "        out[base + 4] = v / 25;\n"
+        "        out[base + 5] = v / 1000;\n"
+        "        out[base + 6] = v / -3;\n"
+        "        out[base + 7] = v / -5;\n"
+        "        out[base + 8] = v / -7;\n"
+        "        out[base + 9] = v / -10;\n"
+        "        out[base + 10] = v / -25;\n"
+        "        out[base + 11] = v / -1000;\n"
+        "        out[base + 12] = v % 3;\n"
+        "        out[base + 13] = v % 5;\n"
+        "        out[base + 14] = v % 7;\n"
+        "        out[base + 15] = v % 10;\n"
+        "        out[base + 16] = v % 25;\n"
+        "        out[base + 17] = v % 1000;\n"
+        "        out[base + 18] = v % -3;\n"
+        "        out[base + 19] = v % -5;\n"
+        "        out[base + 20] = v % -7;\n"
+        "        out[base + 21] = v % -10;\n"
+        "        out[base + 22] = v % -25;\n"
+        "        out[base + 23] = v % -1000;\n"
+        "    }\n"
+        "}\n";
+
+    std::vector<int32_t> h_in = {
+        0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 7, -7, 10, -10, 15, -15, 24, -24, 25, -25,
+        26, -26, 99, -99, 100, -100, 101, -101, 999, -999, 1000, -1000, 1001, -1001,
+        1234567, -1234567, 2147483647, -2147483647 - 1, -2147483647, 1073741823, -1073741824
+    };
+    int n = static_cast<int>(h_in.size());
+    const int opsPerItem = 24;
+    int totalOut = n * opsPerItem;
+
+    std::vector<int32_t> result(totalOut, 0);
+    std::string ptx = compileSourceToPTX(src, optimize);
+    EXPECT_FALSE(ptx.empty());
+    if (ptx.empty()) return result;
+
+    if (optimize) {
+        EXPECT_EQ(ptx.find("div.s32"), std::string::npos) << "Expected div.s32 to be eliminated at -O1:\n" << ptx;
+        EXPECT_EQ(ptx.find("rem.s32"), std::string::npos) << "Expected rem.s32 to be eliminated at -O1:\n" << ptx;
+        EXPECT_NE(ptx.find("mul.hi.s32"), std::string::npos) << "Expected mul.hi.s32 to be emitted at -O1:\n" << ptx;
+    }
+
+    CUmodule mod = fixture->loadPTX(ptx);
+    if (!mod) return result;
+    CUfunction func;
+    EXPECT_EQ(cuModuleGetFunction(&func, mod, "test_non_power_of_two_div_mod"), CUDA_SUCCESS);
+
+    CUdeviceptr d_in, d_out;
+    EXPECT_EQ(cuMemAlloc(&d_in, n * sizeof(int32_t)), CUDA_SUCCESS);
+    EXPECT_EQ(cuMemAlloc(&d_out, totalOut * sizeof(int32_t)), CUDA_SUCCESS);
+    EXPECT_EQ(cuMemcpyHtoD(d_in, h_in.data(), n * sizeof(int32_t)), CUDA_SUCCESS);
+
+    void* args[] = { &d_out, &d_in, &n };
+    EXPECT_EQ(cuLaunchKernel(func, 1, 1, 1, 64, 1, 1, 0, 0, args, 0), CUDA_SUCCESS);
+    EXPECT_EQ(cuCtxSynchronize(), CUDA_SUCCESS);
+
+    EXPECT_EQ(cuMemcpyDtoH(result.data(), d_out, totalOut * sizeof(int32_t)), CUDA_SUCCESS);
+
+    cuMemFree(d_in);
+    cuMemFree(d_out);
+    cuModuleUnload(mod);
+    return result;
+}
+
+TEST_F(KernelE2ETest, NonPowerOfTwoDivModMatchesUnoptimizedGPUAndCpu) {
+    std::vector<int32_t> h_in = {
+        0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 7, -7, 10, -10, 15, -15, 24, -24, 25, -25,
+        26, -26, 99, -99, 100, -100, 101, -101, 999, -999, 1000, -1000, 1001, -1001,
+        1234567, -1234567, 2147483647, -2147483647 - 1, -2147483647, 1073741823, -1073741824
+    };
+    int const divisors[12] = { 3, 5, 7, 10, 25, 1000, -3, -5, -7, -10, -25, -1000 };
+
+    std::vector<int32_t> unopt = runNonPowerOfTwoEdges(this, false);
+    std::vector<int32_t> opt = runNonPowerOfTwoEdges(this, true);
+    ASSERT_EQ(unopt.size(), opt.size());
+    ASSERT_FALSE(unopt.empty());
+
+    for (size_t i = 0; i < h_in.size(); ++i) {
+        int32_t v = h_in[i];
+        size_t base = i * 24;
+        for (int dIdx = 0; dIdx < 12; ++dIdx) {
+            int32_t d = divisors[dIdx];
+            int32_t expected_div = v / d;
+            int32_t expected_mod = v % d;
+
+            int32_t actual_unopt_div = unopt[base + dIdx];
+            int32_t actual_opt_div = opt[base + dIdx];
+            EXPECT_EQ(actual_unopt_div, expected_div) << "Unopt div mismatch at v=" << v << ", d=" << d;
+            EXPECT_EQ(actual_opt_div, expected_div) << "Opt div mismatch at v=" << v << ", d=" << d;
+            EXPECT_EQ(actual_opt_div, actual_unopt_div) << "Div diff between opt and unopt at v=" << v << ", d=" << d;
+
+            int32_t actual_unopt_mod = unopt[base + 12 + dIdx];
+            int32_t actual_opt_mod = opt[base + 12 + dIdx];
+            EXPECT_EQ(actual_unopt_mod, expected_mod) << "Unopt mod mismatch at v=" << v << ", d=" << d;
+            EXPECT_EQ(actual_opt_mod, expected_mod) << "Opt mod mismatch at v=" << v << ", d=" << d;
+            EXPECT_EQ(actual_opt_mod, actual_unopt_mod) << "Mod diff between opt and unopt at v=" << v << ", d=" << d;
+        }
+    }
+}
+
 TEST_F(KernelE2ETest, BitwiseOperatorsMatchCpu) {
     const char* src =
         "kernel test_bitwise(int* out, int* a, int* b, int n) {\n"

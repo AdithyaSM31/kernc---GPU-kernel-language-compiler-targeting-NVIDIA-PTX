@@ -8,7 +8,7 @@
 - `tests/unit/lexer_test.cpp`: Keywords, numeric formats (int/hex/float), source locations, comments.
 - `tests/unit/parser_test.cpp`: Precedence climbing, associativity, casts, unary, control flow AST.
 - `tests/unit/sema_test.cpp`: Type checker, scope stack, promotion, diagnostic error triggers, definite-assignment warnings, barrier-divergence warnings, and call argument type checking under arity mismatches.
-- `tests/unit/ir_pass_test.cpp`: Branch threading, constant folding, dead code elimination, instruction scheduling, inter-procedural inlining / call graph analysis, local Common Subexpression Elimination (CSE) & copy propagation with non-SSA kill and memory aliasing validation, and CFG cleanup (unreachable block pruning, fallthrough branch folding, trampoline redirection, single-predecessor block merging).
+- `tests/unit/ir_pass_test.cpp`: Branch threading, constant folding, dead code elimination, instruction scheduling, inter-procedural inlining / call graph analysis, local Common Subexpression Elimination (CSE) & copy propagation with non-SSA kill and memory aliasing validation, CFG cleanup (unreachable block pruning, fallthrough branch folding, trampoline redirection, single-predecessor block merging), and power-of-two and non-power-of-two signed division/modulo strength reduction (Granlund–Montgomery / Hacker's Delight magic numbers).
 
 ### 2. Negative Diagnostic Tests
 - Located in `tests/diagnostic/err_*.kern` (9 test files).
@@ -40,6 +40,7 @@
     - `reduce`: Tree reduction using shared memory and barriers.
     - `functions`: Device functions with recursion, mutual recursion, float/bool/pointer args and returns, plus nested multi-level inlining and multiple early returns.
     - `cse`: Redundant address arithmetic, duplicate loads, commutative expressions, and aliasing buffers where stores clobber subsequent reads.
+    - `div_mod`: Strength reduction of signed division and modulo by constant powers of two and non-powers of two ($d \notin \{0, \pm 1, \mathrm{INT\_MIN}\}$) using Granlund–Montgomery magic numbers, verified bit-for-bit across `-O0` (hardware `div.s32`), `-O1`, and CPU references.
   - Verifies exact or epsilon-bound match against CPU reference implementation.
 
 ### 5. Line-Table Tests (`kernc -lineinfo` → ptxas → `nvdisasm --print-line-info`)

@@ -257,6 +257,50 @@ For `examples/reduce.kern`, kernc now achieves **36 executable SASS instructions
 (48 instructions including exit NOP bundle alignment), matching `nvcc` (37 instructions, 10 registers)
 with zero `MUFU.RCP` instructions.
 
+#### Non-power-of-two constant division and modulo strength reduction
+
+For non-power-of-two constants, `ptxas` does not optimize `div.s32` or `rem.s32` at the PTX level, leaving an iterative 26-instruction reciprocal approximation sequence utilizing the special function unit (`MUFU.RCP`):
+
+```sass
+/* -O0: Hardware div.s32 expansion (26 SASS instructions, 400 bytes) */
+I2F.U32.RP R0, 0x3 ;
+IABS R4, c[0x0][0x168] ;
+ULDC UR4, c[0x0][0x168] ;
+ULOP3.LUT UR4, UR4, 0x3, URZ, 0x3c, !UPT ;
+ISETP.LE.AND P2, PT, RZ, UR4, PT ;
+MUFU.RCP R0, R0 ;
+IADD3 R2, R0, 0xffffffe, RZ ;
+F2I.FTZ.U32.TRUNC.NTZ R3, R2 ;
+IMAD R5, R3, -0x3, RZ ;
+IMAD.HI.U32 R3, R3, R5, R2 ;
+IMAD.HI.U32 R3, R3, R4, RZ ;
+IMAD R4, R3, -0x3, R4 ;
+ISETP.GE.U32.AND P0, PT, R4, 0x3, PT ;
+@P0 IADD3 R4, R4, -0x3, RZ ;
+@P0 IADD3 R3, R3, 0x1, RZ ;
+ISETP.GE.U32.AND P1, PT, R4, 0x3, PT ;
+@P1 IADD3 R3, R3, 0x1, RZ ;
+@!P2 IADD3 R5, -R5, RZ, RZ ;
+```
+
+`kernc`'s optimizer (`-O1`) implements the Granlund–Montgomery / Hacker's Delight magic-number algorithm (`computeSignedMagic`) for signed `/` and `%` by any constant $d \notin \{0, \pm 1, \mathrm{INT\_MIN}\}$. The division is lowered to high-product multiplication (`mul.hi.s32`, assembling to `IMAD.HI`), arithmetic right shifts, and dividend sign-bias addition:
+
+```sass
+/* -O1: Magic multiplication sequence (9 SASS instructions total, 144 bytes) */
+MOV R1, c[0x0][0x28] ;
+MOV R7, c[0x0][0x168] ;
+IMAD.MOV.U32 R4, RZ, RZ, RZ ;
+MOV R3, c[0x0][0x164] ;
+IMAD.MOV.U32 R2, RZ, RZ, c[0x0][0x160] ;
+SHF.R.U32.HI R5, RZ, 0x1f, R7 ;           // extract sign bit of dividend
+ULDC.64 UR4, c[0x0][0x118] ;
+IMAD.HI R5, R7, 0x55555556, R4 ;          // 32-bit high multiply by magic constant M
+STG.E [R2.64], R5 ;
+EXIT ;
+```
+
+This reduces the kernel from 26 instructions down to 9 instructions (2.89x instruction reduction, >8x reduction in division core) and completely eliminates `MUFU.RCP`. Modulo $x \pmod d$ is similarly lowered to $q = x / d$ followed by $r = x - q \cdot d$ (`mul.lo.s32` + `sub.s32`).
+
 #### Device function inlining on `examples/functions.kern`
 
 `ptxas` does not inline device functions emitted into PTX: in `examples/functions.kern` at `-O0` (and before kernc's inliner), all 11 calls across the module remained as `CALL.REL.NOINC` in SASS, including 7 calls inside `use_functions`. `nvcc`'s front end inlines before emitting PTX.
@@ -398,8 +442,8 @@ Emitted IR frequently contains dead basic blocks after return instructions (`$L_
 
 | Suite | Count | What it checks |
 |---|---|---|
-| Unit tests (GoogleTest) | 129 | Lexer 9, parser 15, Sema 37 (accept/reject, type/arity rules, definite assignment & barrier divergence warnings, diagnostic locations), IR, passes, scheduling, inlining, CSE & CFG cleanup 68 |
-| GPU end-to-end (Driver API) | 29 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
+| Unit tests (GoogleTest) | 132 | Lexer 9, parser 15, Sema 37 (accept/reject, type/arity rules, definite assignment & barrier divergence warnings, diagnostic locations), IR, passes, scheduling, inlining, CSE, CFG cleanup & non-power-of-two magic division 71 |
+| GPU end-to-end (Driver API) | 30 | Each kernel is JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference (details below) |
 | Diagnostics | 1 suite, 9 files | `tests/diagnostic/err_*.kern` must fail with the expected message (and location, where given) |
 | ptxas acceptance | 6 | Every file in `examples/` assembles with `ptxas -arch=sm_86` |
 | ptxas regression | 24 | `tests/regress/*.kern` (12 kernels) assemble at both `-O0` and `-O1` |
@@ -424,6 +468,8 @@ The GPU tests cover:
   constants;
 - a differential test where `-O0` (GPU `div.s32`/`rem.s32`) and `-O1` (strength-reduced shifts/masks)
   must give bit-identical results across positive, negative, zero, and `INT_MIN` values for `/ 2^k` and `% 2^k`;
+- a differential test where `-O0` (GPU `div.s32`/`rem.s32`), `-O1` (magic number multiplication), and CPU references
+  must give bit-identical results across positive, negative, zero, and `INT_MIN` values for non-power-of-two constants (`KernelE2ETest.NonPowerOfTwoDivModMatchesUnoptimizedGPUAndCpu`);
 - a differential test where `-O0` and `-O1` must give bit-identical results on redundant address calculations, duplicate loads, commutative expressions, and aliasing buffers where a store clobbers subsequent reads (`KernelE2ETest.CSEMatchesUnoptimizedGPUAndCpu`);
 - loop unrolling and latency-hiding instruction scheduling across a 5-point stencil filter, 8-element dot-product reduction, and pipelined multi-stream load/ALU/store sequences at `-O0` and `-O1` vs CPU reference;
 - the scheduler keeping a store before a load when memory may alias: two kernel pointer
@@ -444,6 +490,7 @@ Two techniques do most of the work:
   - disabling load invalidation on stores in CSE fails both the aliased buffer GPU differential test (output 19 vs expected 36) and the memory aliasing unit test;
   - disabling fallthrough branch folding in CFG cleanup fails the branch elimination unit test (`braAfter < braBefore`);
   - disabling barrier divergence depth checking fails the barrier divergence warning unit test;
+  - mutating the magic multiplier ($M+1$) in non-power-of-two division fails the GPU differential test against hardware `div.s32` and the CPU reference;
   - removing `bar.sync` fails the block-reverse test, first at thread 64, the first thread of
     the third warp, which read data before its partner warp had written it;
   - removing statement locations fails all six line-table checks;
@@ -477,28 +524,9 @@ Every fix is in the commit history, together with a test that failed before the 
 
 ## Limitations and next steps
 
-- **Strength reduction for non-power-of-two constants.** Signed `/` and `%` by $2^k$ are
-  already strength-reduced to branchless shift/add/mask sequences (see above). Dividing by
-  arbitrary invariant constants via fixed-point multiplication (Granlund-Montgomery / magic
-  numbers) is a natural next step.
-- **No CSE or copy propagation in kernc.** For SAXPY ptxas makes up for it, as shown above,
-  but kernc's own PTX still recomputes addresses and reloads constants.
-- **Inlining of recursive or large functions.** Small, non-recursive device functions are
-  inlined at `-O1` (see above). Functions participating in self or mutual recursion and
-  functions exceeding the instruction count threshold remain out-of-line ABI calls.
-- **No unreachable-block removal.** Code after `return` leaves an unreachable `$L_after_ret`
-  block in the PTX; ptxas removes it.
-- **No definite-assignment analysis.** Reading an uninitialized variable produces valid PTX
-  but an undefined value, as in C, and kernc doesn't warn about it.
-- **No barrier-divergence warning.** A `barrier()` behind a thread-dependent condition (or
-  after an early `return` taken by some threads) isn't diagnosed.
-- **Not yet supported:** structs, 64-bit types other than pointers, and
-  `bool` kernel parameters.
-- **Line info is per statement**, not per expression. Also, `-(2147483648)` is accepted
-  because parentheses aren't kept in the AST; Java rejects it.
-- **compute-sanitizer can't run under WSL here** until the Windows debugger interface is
-  enabled (run `EnableDebuggerInterface.bat` as administrator). With it, memcheck could report
-  faults against `.kern` lines using `-lineinfo`.
+- **Not yet supported:** structs, 64-bit integer types other than pointers, and `bool` kernel parameters.
+- **Line info is per statement**, not per expression. Also, `-(2147483648)` is accepted because parentheses aren't kept in the AST; Java rejects it.
+- **compute-sanitizer demo** needs administrator enablement on Windows via `EnableDebuggerInterface.bat` before memcheck can report faults against `.kern` lines under WSL2.
 
 ---
 

@@ -23,6 +23,41 @@ static int32_t subS32(int32_t a, int32_t b) { return wrap(static_cast<uint32_t>(
 static int32_t mulLoS32(int32_t a, int32_t b) { return wrap(static_cast<uint32_t>(a) * static_cast<uint32_t>(b)); }
 static int32_t negS32(int32_t a) { return wrap(0u - static_cast<uint32_t>(a)); }
 
+int32_t mulHiS32(int32_t a, int32_t b) {
+    int64_t prod = static_cast<int64_t>(a) * static_cast<int64_t>(b);
+    return static_cast<int32_t>(prod >> 32);
+}
+
+// Granlund-Montgomery / Hacker's Delight magic number generation for signed 32-bit division
+// ad = |d| must satisfy 2 <= ad <= 2^31 - 1 (i.e. d != 0, 1, -1, INT32_MIN).
+MagicInfo computeSignedMagic(int32_t d) {
+    uint32_t ad = (d < 0) ? wrap(0u - static_cast<uint32_t>(d)) : static_cast<uint32_t>(d);
+    const uint32_t two31 = 0x80000000u;
+    uint32_t t = two31 + (ad >> 31);
+    uint32_t anc = t - 1 - (t % ad);
+    uint32_t p = 31;
+    uint32_t q1 = two31 / anc;
+    uint32_t r1 = two31 - q1 * anc;
+    uint32_t q2 = two31 / ad;
+    uint32_t r2 = two31 - q2 * ad;
+    uint32_t delta;
+    do {
+        p++;
+        q1 = 2 * q1;
+        r1 = 2 * r1;
+        if (r1 >= anc) { q1++; r1 -= anc; }
+        q2 = 2 * q2;
+        r2 = 2 * r2;
+        if (r2 >= ad) { q2++; r2 -= ad; }
+        delta = ad - r2;
+    } while (q1 < delta || (q1 == delta && r1 == 0));
+
+    uint32_t M_u = q2 + 1;
+    int32_t M = static_cast<int32_t>(M_u);
+    uint32_t s = p - 32;
+    return {M, s};
+}
+
 // shl.b32 / shr.u32 / shr.s32 clamp the shift count (read as unsigned) to 32, so a count of
 // 32 or more shifts every bit out: 0, or all sign bits for shr.s32. In C++ such shifts are
 // undefined, and x86 masks the count to 5 bits, so neither matches the GPU.
@@ -114,6 +149,7 @@ bool Optimizer::runConstantFolding(IRFunction& fn) {
                         case IROp::Add: res = ptx::addS32(c1.intVal, c2.intVal); break;
                         case IROp::Sub: res = ptx::subS32(c1.intVal, c2.intVal); break;
                         case IROp::Mul: res = ptx::mulLoS32(c1.intVal, c2.intVal); break;
+                        case IROp::MulHi: res = ptx::mulHiS32(c1.intVal, c2.intVal); break;
                         case IROp::Div:
                             if (ptx::canFoldDivS32(c1.intVal, c2.intVal)) res = c1.intVal / c2.intVal;
                             else folded = false;
@@ -393,6 +429,102 @@ bool Optimizer::runConstantFolding(IRFunction& fn) {
                             newInsts.push_back(and_inst);
                             newInsts.push_back(sub_inst);
                         }
+                    }
+
+                    bb.instructions.erase(bb.instructions.begin() + i);
+                    bb.instructions.insert(bb.instructions.begin() + i, newInsts.begin(), newInsts.end());
+                    i += newInsts.size() - 1;
+                    changed = true;
+                    continue;
+                } else if ((inst.op == IROp::Div || inst.op == IROp::Mod) &&
+                           val != 0 && val != 1 && val != -1 && val != INT32_MIN) {
+                    SourceLocation loc = inst.srcLoc;
+                    VReg x = inst.src1;
+                    VReg dst = inst.dst;
+                    int32_t d = val;
+                    ptx::MagicInfo m = ptx::computeSignedMagic(d);
+                    std::vector<IRInst> newInsts;
+
+                    // 1. Load magic multiplier M into register
+                    VReg immM = fn.freshReg(IRType::S32);
+                    IRInst liM(IROp::LoadImm, immM, 0, 0, IRType::S32);
+                    liM.immInt = m.M;
+                    liM.srcLoc = loc;
+                    newInsts.push_back(liM);
+
+                    // 2. High 32 bits of product: q0 = mul.hi.s32(x, M)
+                    VReg q0 = fn.freshReg(IRType::S32);
+                    IRInst mulHi(IROp::MulHi, q0, x, immM, IRType::S32);
+                    mulHi.srcLoc = loc;
+                    newInsts.push_back(mulHi);
+
+                    // 3. If M < 0: q1 = q0 + x (compensate for negative signed multiplier)
+                    VReg q1 = q0;
+                    if (m.M < 0) {
+                        q1 = fn.freshReg(IRType::S32);
+                        IRInst addN(IROp::Add, q1, q0, x, IRType::S32);
+                        addN.srcLoc = loc;
+                        newInsts.push_back(addN);
+                    }
+
+                    // 4. Arithmetic right shift by post-shift s: q2 = q1 >> s
+                    VReg q2 = q1;
+                    if (m.s > 0) {
+                        VReg immS = fn.freshReg(IRType::S32);
+                        IRInst liS(IROp::LoadImm, immS, 0, 0, IRType::S32);
+                        liS.immInt = static_cast<int32_t>(m.s);
+                        liS.srcLoc = loc;
+                        newInsts.push_back(liS);
+
+                        q2 = fn.freshReg(IRType::S32);
+                        IRInst shrS(IROp::ShrS32, q2, q1, immS, IRType::S32);
+                        shrS.srcLoc = loc;
+                        newInsts.push_back(shrS);
+                    }
+
+                    // 5. Sign correction: add sign bit of x (1 if x < 0, 0 if x >= 0)
+                    VReg imm31 = fn.freshReg(IRType::S32);
+                    IRInst li31(IROp::LoadImm, imm31, 0, 0, IRType::S32);
+                    li31.immInt = 31;
+                    li31.srcLoc = loc;
+                    newInsts.push_back(li31);
+
+                    VReg rSign = fn.freshReg(IRType::S32);
+                    IRInst shrSign(IROp::ShrU32, rSign, x, imm31, IRType::S32);
+                    shrSign.srcLoc = loc;
+                    newInsts.push_back(shrSign);
+
+                    // 6. Quotient for positive |d|: qPos = q2 + rSign
+                    VReg qPos = (d > 0 && inst.op == IROp::Div) ? dst : fn.freshReg(IRType::S32);
+                    IRInst addSign(IROp::Add, qPos, q2, rSign, IRType::S32);
+                    addSign.srcLoc = loc;
+                    newInsts.push_back(addSign);
+
+                    // 7. If d < 0: negate quotient (trunc(x / d) = -trunc(x / |d|))
+                    VReg q = qPos;
+                    if (d < 0) {
+                        q = (inst.op == IROp::Div) ? dst : fn.freshReg(IRType::S32);
+                        IRInst negQ(IROp::Neg, q, qPos, 0, IRType::S32);
+                        negQ.srcLoc = loc;
+                        newInsts.push_back(negQ);
+                    }
+
+                    // 8. If Mod: r = x - q * d
+                    if (inst.op == IROp::Mod) {
+                        VReg immD = fn.freshReg(IRType::S32);
+                        IRInst liD(IROp::LoadImm, immD, 0, 0, IRType::S32);
+                        liD.immInt = d;
+                        liD.srcLoc = loc;
+                        newInsts.push_back(liD);
+
+                        VReg prod = fn.freshReg(IRType::S32);
+                        IRInst mulD(IROp::Mul, prod, q, immD, IRType::S32);
+                        mulD.srcLoc = loc;
+                        newInsts.push_back(mulD);
+
+                        IRInst subR(IROp::Sub, dst, x, prod, IRType::S32);
+                        subR.srcLoc = loc;
+                        newInsts.push_back(subR);
                     }
 
                     bb.instructions.erase(bb.instructions.begin() + i);
@@ -819,6 +951,7 @@ static bool isCommutativeOp(IROp op) {
     switch (op) {
         case IROp::Add:
         case IROp::Mul:
+        case IROp::MulHi:
         case IROp::And:
         case IROp::Or:
         case IROp::Xor:
@@ -842,6 +975,7 @@ static bool isCSECandidate(const IRInst& inst) {
         case IROp::Add:
         case IROp::Sub:
         case IROp::Mul:
+        case IROp::MulHi:
         case IROp::Div:
         case IROp::Mod:
         case IROp::And:

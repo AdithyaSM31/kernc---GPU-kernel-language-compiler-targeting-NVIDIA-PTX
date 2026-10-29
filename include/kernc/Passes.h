@@ -7,6 +7,16 @@
 
 namespace kernc {
 
+namespace ptx {
+struct MagicInfo {
+    int32_t M;
+    uint32_t s;
+};
+
+MagicInfo computeSignedMagic(int32_t d);
+int32_t mulHiS32(int32_t a, int32_t b);
+} // namespace ptx
+
 struct CallGraph {
     std::unordered_map<std::string, std::unordered_set<std::string>> callersToCallees;
 

@@ -42,7 +42,7 @@ enum class AddrSpace {
 
 enum class IROp {
     // Integer Arithmetic
-    Add, Sub, Mul, Div, Mod,
+    Add, Sub, Mul, MulHi, Div, Mod,
     // Bitwise and Shifts
     And, Or, Xor, Not, Shl, ShrS32, ShrU32,
     // Float Arithmetic

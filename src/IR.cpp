@@ -18,6 +18,7 @@ const char* irOpToString(IROp op) {
         case IROp::Add:        return "add";
         case IROp::Sub:        return "sub";
         case IROp::Mul:        return "mul";
+        case IROp::MulHi:      return "mul.hi";
         case IROp::Div:        return "div";
         case IROp::Mod:        return "rem";
         case IROp::And:        return "and";

@@ -209,6 +209,9 @@ std::string PTXEmitter::emitFunction(const IRFunction& fn) {
                 case IROp::Mul:
                     ss << "    mul.lo.s32 " << dst << ", " << s1 << ", " << s2 << ";\n";
                     break;
+                case IROp::MulHi:
+                    ss << "    mul.hi.s32 " << dst << ", " << s1 << ", " << s2 << ";\n";
+                    break;
                 case IROp::Div:
                     ss << "    div.s32 " << dst << ", " << s1 << ", " << s2 << ";\n";
                     break;

@@ -88,30 +88,42 @@ The IR is a non-SSA 3-address virtual-register code organized into Basic Blocks 
    - `tests/regress/name_collisions.kern` uses source names that match the old, underscore-based
      scheme (`entry`, `L_then_0`, `f_retval`, `param0`, `k_buf`, ...); ptxas and a GPU test check it.
 
-9. **Strength Reduction for Integer Division and Modulo by $2^k$**:
-   - `ptxas` treats `div.s32` and `rem.s32` literally: when emitted in PTX, `ptxas` lowers them to an iterative ~20-instruction Newton-Raphson approximation sequence using `MUFU.RCP`, even when the divisor is a constant power of two.
-   - `kernc`'s optimizer (`Optimizer::runConstantFolding`) lowers signed `/` and `%` by a constant power of two ($2^k$, $k \in [1, 30]$) into branchless shift/add/mask arithmetic that truncates toward zero:
-     - For $k = 1$ ($2^1 = 2$):
-       ```ptx
-       shr.u32 %r_sign, %r_x, 31;
-       add.s32 %r_biased, %r_x, %r_sign;
-       shr.s32 %r_out, %r_biased, 1;
-       ```
-       On sm_86, `ptxas` fuses `shr.u32` and `add.s32` into a single `LEA.HI` instruction, taking only 2 SASS instructions total.
-     - For $k \in [2, 30]$ ($2^k$):
-       ```ptx
-       shr.s32 %r_mask, %r_x, 31;
-       shr.u32 %r_bias, %r_mask, (32 - k);
-       add.s32 %r_biased, %r_x, %r_bias;
-       shr.s32 %r_out, %r_biased, k;
-       ```
-     - For signed modulo $x \pmod{2^k}$, the biased dividend is computed identically, masked with `-(1 << k)` to clear the lowest $k$ bits, and subtracted from $x$:
-       ```ptx
-       and.b32 %r_masked, %r_biased, -(1 << k);
-       sub.s32 %r_out, %r_x, %r_masked;
-       ```
+9. **Strength Reduction for Integer Division and Modulo**:
+   - `ptxas` treats `div.s32` and `rem.s32` literally: when emitted in PTX, `ptxas` lowers them to an iterative ~26-instruction Newton-Raphson approximation sequence using `MUFU.RCP`, even when the divisor is a constant.
+   - `kernc`'s optimizer (`Optimizer::runConstantFolding`) lowers signed `/` and `%` by any constant $d \notin \{0, \pm 1, \mathrm{INT\_MIN}\}$ into branchless sequences that truncate toward zero:
+     - **Constant power-of-two divisors ($2^k$, $k \in [1, 30]$)**:
+       - For $k = 1$ ($2^1 = 2$):
+         ```ptx
+         shr.u32 %r_sign, %r_x, 31;
+         add.s32 %r_biased, %r_x, %r_sign;
+         shr.s32 %r_out, %r_biased, 1;
+         ```
+         On sm_86, `ptxas` fuses `shr.u32` and `add.s32` into a single `LEA.HI` instruction, taking only 2 SASS instructions total.
+       - For $k \in [2, 30]$ ($2^k$):
+         ```ptx
+         shr.s32 %r_mask, %r_x, 31;
+         shr.u32 %r_bias, %r_mask, (32 - k);
+         add.s32 %r_biased, %r_x, %r_bias;
+         shr.s32 %r_out, %r_biased, k;
+         ```
+       - For signed modulo $x \pmod{2^k}$, the biased dividend is computed identically, masked with `-(1 << k)` to clear the lowest $k$ bits, and subtracted from $x$:
+         ```ptx
+         and.b32 %r_masked, %r_biased, -(1 << k);
+         sub.s32 %r_out, %r_x, %r_masked;
+         ```
+     - **Non-power-of-two (and negative) constant divisors ($d \notin \{0, \pm 1, \mathrm{INT\_MIN}\}$, $d \ne 2^k$)**:
+       - Lowered using the Granlund–Montgomery / Hacker's Delight magic-number algorithm (`computeSignedMagic(|d|)`):
+         1. Compute magic multiplier $M$ and post-shift $s$ for $|d|$.
+         2. Emit high 32 bits of 64-bit product: `mul.hi.s32 %q0, %x, M;` (`IMAD.HI` in SASS).
+         3. If $M < 0$: `add.s32 %q1, %q0, %x;` (compensates for negative sign bit in multiplier).
+         4. If $s > 0$: `shr.s32 %q2, %q1, s;`
+         5. Extract dividend sign bit: `shr.u32 %r_sign, %x, 31;`
+         6. Add sign bit for truncation toward zero: `add.s32 %q_pos, %q2, %r_sign;`
+         7. If $d < 0$: `neg.s32 %q, %q_pos;`
+         8. For modulo $x \pmod d$: compute $q$, then `mul.lo.s32 %prod, %q, d;` and `sub.s32 %r, %x, %prod;`.
+       - Eliminates all 26 instructions of the iterative `MUFU.RCP` reciprocal sequence, reducing kernel SASS to 9 instructions (over 8x reduction in division core, 0 `MUFU.RCP`).
      - Identity cases: $x / 1 \to x$ (`mov`), $x \% 1 \to 0$ (`ldimm 0`).
-   - Differential testing (`StrengthReducedDivModMatchesUnoptimizedGPU`) runs across positive, negative, zero, and `INT_MIN` inputs against unoptimized `-O0` GPU execution, verifying bit-identical output.
+   - Differential testing (`StrengthReducedDivModMatchesUnoptimizedGPU` and `NonPowerOfTwoDivModMatchesUnoptimizedGPUAndCpu`) runs across positive, negative, zero, and `INT_MIN` inputs against unoptimized `-O0` GPU execution and CPU references, verifying bit-identical output.
 
 10. **Bitwise Operators and Algebraic Identities**:
     - The bitwise operators (`&`, `|`, `^`, `~`, `<<`, `>>`) operate on 32-bit `int` registers.

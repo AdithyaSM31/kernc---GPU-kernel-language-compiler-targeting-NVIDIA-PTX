@@ -583,18 +583,18 @@ TEST(IRPassTest, PTXEmissionValidStructure) {
 
 TEST(IRPassTest, StrengthReduceDivByPowerOfTwo) {
     // Non-constant dividend divided by power of two must be lowered to shift/bias/add/shift.
-    // Div by 1 is identity (mov). Non-power-of-two remains div.s32.
-    std::string src = "kernel t(int* o, int x) {\n"
+    // Div by 1 is identity (mov). Division by variable parameter remains div.s32.
+    std::string src = "kernel t(int* o, int x, int y) {\n"
                       "    o[0] = x / 2;\n"
                       "    o[1] = x / 8;\n"
                       "    o[2] = x / 1024;\n"
-                      "    o[3] = x / 3;\n"
+                      "    o[3] = x / y;\n"
                       "    o[4] = x / 1;\n"
                       "}\n";
     auto fn = compileToIR(src);
     Optimizer::runPasses(fn);
 
-    // Only x / 3 should remain as a Div op
+    // Only x / y should remain as a Div op
     EXPECT_EQ(countOps(fn, IROp::Div), 1) << fn.dump();
     EXPECT_GT(countOps(fn, IROp::ShrS32), 0) << fn.dump();
     EXPECT_GT(countOps(fn, IROp::ShrU32), 0) << fn.dump();
@@ -602,20 +602,109 @@ TEST(IRPassTest, StrengthReduceDivByPowerOfTwo) {
 
 TEST(IRPassTest, StrengthReduceModByPowerOfTwo) {
     // Non-constant dividend modulo power of two must be lowered to bias/add/and/sub.
-    // Mod by 1 is zero. Non-power-of-two remains rem.s32.
-    std::string src = "kernel t(int* o, int x) {\n"
+    // Mod by 1 is zero. Modulo by variable parameter remains rem.s32.
+    std::string src = "kernel t(int* o, int x, int y) {\n"
                       "    o[0] = x % 2;\n"
                       "    o[1] = x % 4;\n"
                       "    o[2] = x % 128;\n"
-                      "    o[3] = x % 5;\n"
+                      "    o[3] = x % y;\n"
                       "    o[4] = x % 1;\n"
                       "}\n";
     auto fn = compileToIR(src);
     Optimizer::runPasses(fn);
 
-    // Only x % 5 should remain as a Mod op
+    // Only x % y should remain as a Mod op
     EXPECT_EQ(countOps(fn, IROp::Mod), 1) << fn.dump();
     EXPECT_GT(countOps(fn, IROp::And), 0) << fn.dump();
+}
+
+TEST(IRPassTest, StrengthReduceDivNonPowerOfTwo) {
+    // Division by non-power-of-two constants (positive and negative) lowers to magic mul.hi and shifts
+    std::string src = "kernel t(int* o, int x) {\n"
+                      "    o[0] = x / 3;\n"
+                      "    o[1] = x / 5;\n"
+                      "    o[2] = x / 7;\n"
+                      "    o[3] = x / 10;\n"
+                      "    o[4] = x / -3;\n"
+                      "    o[5] = x / -7;\n"
+                      "    o[6] = x / -5;\n"
+                      "}\n";
+    auto fn = compileToIR(src);
+    Optimizer::runPasses(fn);
+
+    // All constant divisions must be lowered; no Div op remaining
+    EXPECT_EQ(countOps(fn, IROp::Div), 0) << fn.dump();
+    EXPECT_GT(countOps(fn, IROp::MulHi), 0) << fn.dump();
+}
+
+TEST(IRPassTest, StrengthReduceModNonPowerOfTwo) {
+    // Modulo by non-power-of-two constants lowers to magic division followed by mul and sub
+    std::string src = "kernel t(int* o, int x) {\n"
+                      "    o[0] = x % 3;\n"
+                      "    o[1] = x % 5;\n"
+                      "    o[2] = x % 7;\n"
+                      "    o[3] = x % 10;\n"
+                      "    o[4] = x % -3;\n"
+                      "    o[5] = x % -7;\n"
+                      "    o[6] = x % -5;\n"
+                      "}\n";
+    auto fn = compileToIR(src);
+    Optimizer::runPasses(fn);
+
+    // All constant modulos must be lowered; no Mod op remaining
+    EXPECT_EQ(countOps(fn, IROp::Mod), 0) << fn.dump();
+    EXPECT_GT(countOps(fn, IROp::MulHi), 0) << fn.dump();
+    EXPECT_GT(countOps(fn, IROp::Mul), 0) << fn.dump();
+    EXPECT_GT(countOps(fn, IROp::Sub), 0) << fn.dump();
+}
+
+TEST(IRPassTest, MagicDivisionSignedExhaustiveCPU) {
+    // Helper to compute quotient via magic number sequence
+    auto evalMagicDiv = [](int32_t n, int32_t d) -> int32_t {
+        ptx::MagicInfo m = ptx::computeSignedMagic(d);
+        int32_t q0 = ptx::mulHiS32(n, m.M);
+        int32_t q1 = (m.M < 0) ? (q0 + n) : q0;
+        int32_t q2 = (m.s > 0) ? (q1 >> m.s) : q1;
+        int32_t sign_n = static_cast<int32_t>(static_cast<uint32_t>(n) >> 31);
+        int32_t q = q2 + sign_n;
+        if (d < 0) q = -q;
+        return q;
+    };
+
+    auto evalMagicRem = [&](int32_t n, int32_t d) -> int32_t {
+        int32_t q = evalMagicDiv(n, d);
+        return n - q * d;
+    };
+
+    int divisors[] = {
+        2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 25, 100, 1000, 65535, 1000000007,
+        -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14, -15, -16, -25, -100, -1000, -65535, -1000000007
+    };
+
+    for (int d : divisors) {
+        int32_t test_ns[] = {
+            0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6, -6, 7, -7, 8, -8, 9, -9, 10, -10,
+            11, -11, 12, -12, 13, -13, 14, -14, 15, -15, 16, -16, 25, -25, 100, -100,
+            1000, -1000, 1234567, -1234567,
+            std::numeric_limits<int32_t>::max(),
+            std::numeric_limits<int32_t>::min(),
+            std::numeric_limits<int32_t>::max() - 1,
+            std::numeric_limits<int32_t>::min() + 1,
+            std::numeric_limits<int32_t>::max() / 2,
+            std::numeric_limits<int32_t>::min() / 2,
+            d, -d, 2 * d, -2 * d, d + 1, d - 1, -d + 1, -d - 1
+        };
+        for (int32_t n : test_ns) {
+            EXPECT_EQ(evalMagicDiv(n, d), n / d) << "Div mismatch for n=" << n << ", d=" << d;
+            EXPECT_EQ(evalMagicRem(n, d), n % d) << "Rem mismatch for n=" << n << ", d=" << d;
+        }
+
+        // Dense sweep around zero
+        for (int32_t n = -2000; n <= 2000; n += 17) {
+            EXPECT_EQ(evalMagicDiv(n, d), n / d) << "Div dense mismatch for n=" << n << ", d=" << d;
+            EXPECT_EQ(evalMagicRem(n, d), n % d) << "Rem dense mismatch for n=" << n << ", d=" << d;
+        }
+    }
 }
 
 TEST(IRPassTest, FoldBitwiseOperations) {
