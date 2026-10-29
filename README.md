@@ -35,7 +35,7 @@ What it supports:
 - `.file` / `.loc` source line info with `-lineinfo`
 - diagnostics with `file:line:column` and a caret
 
-The suite has 203 tests, and all of them pass, both in a normal build and under
+The suite has 204 tests, and all of them pass, both in a normal build and under
 UndefinedBehaviorSanitizer.
 
 ---
@@ -394,6 +394,32 @@ For SAXPY, `nvdisasm --print-line-info` shows (trimmed):
 Optimization stays on: ptxas turned the bounds check into a predicated `EXIT` and still kept
 the right lines.
 
+The same line table is what NVIDIA's runtime tools use. Run under `compute-sanitizer` through
+`kernc-runner`, an out-of-bounds write in a kernel compiled with `-lineinfo` is reported against
+its `.kern` line (without `-lineinfo` the report only says `at oob+0xa0`):
+
+```
+========= Invalid __global__ write of size 4 bytes
+=========     at oob+0xa0 in oob.kern:5
+=========     by thread (0,0,0) in block (0,0,0)
+=========     Access to 0x507a04000 is out of bounds
+```
+
+`racecheck` finds **0 hazards** in `examples/reduce.kern`. With its `barrier()` calls removed,
+it reports the shared-memory race against the exact lines: the read of `sdata[tid + s]` racing
+with the writes `sdata[tid] = v` and `sdata[tid] = sdata[tid] + sdata[tid + s]`.
+
+```
+========= Error: Race reported between Read access at reduce_sum+0x170 in reduce_nobar.kern:20
+=========     and Write access at reduce_sum+0x110 in reduce_nobar.kern:16 [2432 hazards]
+=========     and Write access at reduce_sum+0x1a0 in reduce_nobar.kern:20 [2032 hazards]
+```
+
+Both checks run as the `compute_sanitizer_memcheck_racecheck` test. On WSL2, compute-sanitizer
+first needs the GPU debugger interface: in an Administrator PowerShell on Windows, run
+`reg add "HKLM\SOFTWARE\NVIDIA Corporation\GPUDebugger" /v EnableInterface /t REG_DWORD /d 1 /f`
+and then `wsl --shutdown`. Without it the test is reported as skipped.
+
 **8. Integer literal range follows Java.** `-2147483648` lexes as minus applied to
 `2147483648`, which doesn't fit in an `int` on its own. C handles this by giving the literal a
 wider type, but kernc has no wider type, so it uses Java's rule from JLS §3.10.1. The check
@@ -458,6 +484,7 @@ Emitted IR frequently contains dead basic blocks after return instructions (`$L_
 | ptxas regression | 24 | `tests/regress/*.kern` (12 kernels) assemble at both `-O0` and `-O1` |
 | Line tables | 2 | `kernc -lineinfo` → ptxas → `nvdisasm --print-line-info`; each `//@ REGEX` line must own matching SASS |
 | Runner CLI e2e | 1 suite, 21 stages | `kernc-runner` driver invocation, argument marshaling, device execution, error validation, and `--arg` type checking against the PTX `.param` types |
+| compute-sanitizer | 1 | `memcheck` reports an out-of-bounds write against its `.kern` line; `racecheck` finds `examples/reduce.kern` race-free and catches the race once its barriers are removed (skipped if the GPU debugger interface is off) |
 
 The GPU tests cover:
 
@@ -536,7 +563,6 @@ Every fix is in the commit history, together with a test that failed before the 
 
 - **Not yet supported:** structs, 64-bit integer types other than pointers, and `bool` kernel parameters.
 - **Line info is per statement**, not per expression.
-- **compute-sanitizer demo** needs administrator enablement on Windows via `EnableDebuggerInterface.bat` before memcheck can report faults against `.kern` lines under WSL2.
 
 ---
 

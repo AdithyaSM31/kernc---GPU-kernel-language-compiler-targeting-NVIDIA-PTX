@@ -101,3 +101,20 @@ if (TARGET kernc-runner AND CUDA_FOUND)
     )
 endif()
 
+# 7. NVIDIA compute-sanitizer: memcheck must report an out-of-bounds write against its .kern line
+#    (line info end to end), and racecheck must find the reduction race-free but catch it with
+#    the barriers removed. Skipped (exit 77) when the GPU debugger interface is not enabled.
+find_program(COMPUTE_SANITIZER_BIN compute-sanitizer PATHS /usr/local/cuda-13.0/bin /usr/local/cuda/bin)
+if (TARGET kernc-runner AND CUDA_FOUND AND COMPUTE_SANITIZER_BIN)
+    add_test(NAME compute_sanitizer_memcheck_racecheck
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/sanitizer/check_sanitizer.py
+                ${COMPUTE_SANITIZER_BIN}
+                $<TARGET_FILE:kernc>
+                $<TARGET_FILE:kernc-runner>
+                ${CMAKE_SOURCE_DIR}/examples
+                ${CMAKE_CURRENT_SOURCE_DIR}/sanitizer
+                ${CMAKE_CURRENT_BINARY_DIR}/sanitizer_test
+    )
+    set_tests_properties(compute_sanitizer_memcheck_racecheck PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+

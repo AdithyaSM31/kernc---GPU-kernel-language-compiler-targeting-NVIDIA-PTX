@@ -68,3 +68,16 @@
   - Negative test suite verifying robust error handling and resource cleanup on missing files, unknown kernel symbols, argument count mismatches, and invalid dump specifications.
   - Argument type checking: each `--arg` must match its PTX `.param` type (`.f32` → `f32:`, `.s32`/`.u32`/`.b32` → `i32:`, `.u64`/`.b64` pointer → `buf:`). Mismatches must be rejected before launch with the argument number and expected type (stage 21).
 
+
+### 7. NVIDIA compute-sanitizer (`tests/sanitizer/check_sanitizer.py`)
+- CTest `compute_sanitizer_memcheck_racecheck` runs kernc output through `kernc-runner` under
+  `compute-sanitizer`:
+  - `memcheck`: `tests/sanitizer/oob.kern`, compiled with `-lineinfo`, writes out of bounds; the
+    report must name `oob.kern:<line of the write>`. This checks the line info end to end:
+    IR source locations → PTX `.loc` → driver JIT → the sanitizer's report.
+  - `racecheck`: `examples/reduce.kern` must report 0 hazards, and the same file with every
+    `barrier();` removed (generated at test time, so it cannot drift) must report a race.
+- Exits 77, which CTest records as skipped, when compute-sanitizer cannot attach. On WSL2 that
+  needs the Windows registry value
+  `HKLM\SOFTWARE\NVIDIA Corporation\GPUDebugger\EnableInterface = 1` (then `wsl --shutdown`).
+- Mutation check: with `.loc` emission disabled in the PTX emitter, the memcheck check fails.

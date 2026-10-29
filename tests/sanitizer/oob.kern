@@ -1,0 +1,7 @@
+// compute-sanitizer memcheck must report this out-of-bounds write against this file and line.
+kernel oob(int* out, int n) {
+    int i = block_idx * block_dim + thread_idx;
+    if (i < n) {
+        out[i + 4096] = i;
+    }
+}
