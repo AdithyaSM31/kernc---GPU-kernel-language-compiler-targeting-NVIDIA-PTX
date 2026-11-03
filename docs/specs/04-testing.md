@@ -11,7 +11,7 @@
 - `tests/unit/ir_pass_test.cpp`: Branch threading, constant folding, dead code elimination, instruction scheduling, inter-procedural inlining / call graph analysis, local Common Subexpression Elimination (CSE) & copy propagation with non-SSA kill and memory aliasing validation, CFG cleanup (unreachable block pruning, fallthrough branch folding, trampoline redirection, single-predecessor block merging), power-of-two and non-power-of-two signed division/modulo strength reduction (Granlund–Montgomery / Hacker's Delight magic numbers), and warp shuffle sub-warp width PTX operand encoding.
 
 ### 2. Negative Diagnostic Tests
-- Located in `tests/diagnostic/err_*.kern` (10 test files).
+- Located in `tests/diagnostic/err_*.kern` (11 test files).
 - Verified automatically by `tests/diagnostic/run_diagnostic_tests.py`.
 - Checks that erroneous programs fail compilation with precise line, column, and diagnostic messages.
 - `tests/diagnostic/check_no_warnings.py` (CTest `shipped_kernels_have_no_unexpected_warnings`)

@@ -156,6 +156,11 @@ bool Sema::checkFunction(FunctionDecl& kernel) {
         if (kernel.returnType.isPtr()) {
             diag_.error(kernel.range.begin, "device functions cannot return pointers");
         }
+        // Calls and returns marshal scalar .param values only; there is no vector ABI.
+        if (kernel.returnType.isVector()) {
+            diag_.error(kernel.range.begin, "device functions cannot return vector type '" +
+                        kernel.returnType.toString() + "'");
+        }
     }
 
     for (const auto& param : kernel.params) {
@@ -171,6 +176,11 @@ bool Sema::checkFunction(FunctionDecl& kernel) {
             // bool lives in .pred registers, and the .param space has no predicate type.
             diag_.error(param.loc, "kernel parameter '" + param.name +
                         "' cannot have type 'bool' (pass an int instead)");
+        }
+        if (param.type.isVector()) {
+            const std::string vec = param.type.toString();
+            diag_.error(param.loc, (kernel.isKernel ? "kernel parameter '" : "parameter '") + param.name +
+                        "' cannot have vector type '" + vec + "' (pass a '" + vec + "*' instead)");
         }
         if (!symTable_.declare(param.name, param.type)) {
             diag_.error(param.loc, (kernel.isKernel ? "duplicate kernel parameter name '" : "duplicate parameter name '") + param.name + "'");

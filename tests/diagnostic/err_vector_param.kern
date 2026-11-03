@@ -1,0 +1,8 @@
+// Expected error: 2:15: error: parameter 'v' cannot have vector type 'float4' (pass a 'float4*' instead)
+func float4 f(float4 v) {
+    return v;
+}
+
+kernel k(float4* o) {
+    o[0] = f(o[0]);
+}

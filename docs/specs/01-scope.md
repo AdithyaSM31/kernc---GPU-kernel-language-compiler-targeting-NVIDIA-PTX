@@ -98,11 +98,11 @@ All built-in identifiers evaluate to 32-bit signed integer values (`int`). Their
   after an early `return` taken by some of them). See `examples/reduce.kern`.
 
 ### Functions
-- Kernels: `kernel name(params) { ... }` defines a top-level GPU entry point (`.visible .entry` in PTX). Kernels return void and cannot accept `bool` parameters.
+- Kernels: `kernel name(params) { ... }` defines a top-level GPU entry point (`.visible .entry` in PTX). Kernels return void and cannot accept `bool` or vector-value parameters (pass an `int`, or a vector pointer such as `float4*`).
 - Device Functions: `func <type> name(params) { ... }` defines a device function (`.func` in PTX) that can be called from kernels and other device functions.
   - Return types: `void`, `int`, `float`, or `bool`. Device functions cannot return pointers.
   - Non-void functions must return a value on all control paths; reaching the end of the body without a return is a compile error. Void functions cannot return a value.
-  - Parameters: `int`, `float`, `bool`, `int*`, `float*`. Unlike kernels, `bool` parameters are permitted (passed across the ABI as 32-bit values). Pointer parameters receive already-converted global addresses.
+  - Parameters: `int`, `float`, `bool`, or a pointer (`int*`, `float*`, `int2*`, `int4*`, `float2*`, `float4*`). Vector values cannot be parameters or return values, since calls marshal only scalar `.param` values; pass a vector pointer instead. Unlike kernels, `bool` parameters are permitted (passed across the ABI as 32-bit values). Pointer parameters receive already-converted global addresses.
   - Shared memory: `shared` arrays cannot be declared in device functions (they are block-scope and only allowed in kernels).
   - Calling: Calls can appear as expressions or expression statements (for void or discarded returns). Forward calls and recursion / mutual recursion are supported; signatures are collected in an initial pass and prototypes are emitted ahead of definitions.
 

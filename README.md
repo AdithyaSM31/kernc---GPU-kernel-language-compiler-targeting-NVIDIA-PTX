@@ -3,7 +3,7 @@
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
 [![CUDA](https://img.shields.io/badge/CUDA-13.0-green.svg)](https://developer.nvidia.com/cuda-toolkit)
 [![Target](https://img.shields.io/badge/PTX-sm__86-orange.svg)](https://docs.nvidia.com/cuda/parallel-thread-execution/)
-[![Tests](https://img.shields.io/badge/tests-204%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-205%20passing-brightgreen.svg)](#testing)
 
 kernc compiles a small C-like GPU kernel language (`.kern` files) to PTX, the virtual ISA that
 NVIDIA's `ptxas` assembles into machine code (SASS). It is written in C++17 from scratch: a
@@ -45,9 +45,9 @@ kernc-runner saxpy.ptx saxpy ...     # PTX -> GPU, through the CUDA Driver API
 - **Front-end diagnostics** with `file:line:col` and a caret: type errors, literal range,
   call arity and types, plus warnings for possibly-uninitialized variables and `barrier()`
   inside divergent control flow.
-- **204 tests** (unit, GPU end-to-end, ptxas acceptance, line tables, diagnostics,
+- **205 tests** (unit, GPU end-to-end, ptxas acceptance, line tables, diagnostics,
   compute-sanitizer), all passing in a normal build and under UndefinedBehaviorSanitizer.
-  Writing them found 15 real bugs, listed [below](#bugs-the-tests-found).
+  Writing them found 16 real bugs, listed [below](#bugs-the-tests-found).
 
 ## Contents
 
@@ -733,7 +733,7 @@ kernc's own regression kernels, which could deadlock in a partially filled block
 ## Testing
 
 ```bash
-ctest --test-dir build --output-on-failure             # everything (204 tests)
+ctest --test-dir build --output-on-failure             # everything (205 tests)
 ctest --test-dir build -R KernelE2ETest                # only the GPU tests
 ctest --test-dir build -R "ptx_|lineinfo"              # only the ptxas / nvdisasm checks
 ./build/tests/kernc_unit_tests --gtest_filter='*CSE*'  # one group of unit tests
@@ -741,12 +741,12 @@ ctest --test-dir build -R "ptx_|lineinfo"              # only the ptxas / nvdisa
 
 | Suite | Tests | What it checks |
 |---|---|---|
-| Unit tests (GoogleTest) | 137 | Lexer 9, parser 16, Sema 40, IR and passes 72 |
+| Unit tests (GoogleTest) | 138 | Lexer 9, parser 16, Sema 41, IR and passes 72 |
 | GPU end-to-end (Driver API) | 31 | Kernels JIT-loaded with `cuModuleLoadDataEx`, launched, and compared with a CPU reference |
 | ptxas acceptance | 6 | Every file in `examples/` assembles with `ptxas -arch=sm_86` |
 | ptxas regression | 24 | The 12 kernels in `tests/regress/` assemble at both `-O0` and `-O1` |
 | Line tables | 2 | `kernc -lineinfo` → ptxas → `nvdisasm --print-line-info`: each `//@ REGEX` line must own matching SASS, at `-O0` and `-O1` |
-| Diagnostics | 1 (10 files) | Each `tests/diagnostic/err_*.kern` must fail with the expected message and location |
+| Diagnostics | 1 (11 files) | Each `tests/diagnostic/err_*.kern` must fail with the expected message and location |
 | No unexpected warnings | 1 | Every shipped kernel compiles without warnings unless it declares them |
 | kernc-runner | 1 (21 stages) | Launching, argument parsing, `--dump`, and the error paths, including `--arg` type checking |
 | compute-sanitizer | 1 | memcheck reports the out-of-bounds write at its `.kern` line; racecheck finds the reduction clean, and the barrier-free version racy |
@@ -801,14 +801,15 @@ these. Each fix is a separate commit, with a test that failed before the fix.
 | Atomics accepted vector targets | `atomic_add` on a `float4*` emitted an integer `atom.add.s32` on float data |
 | kernc-runner checked only the argument count | An `i32` passed for a pointer faulted; an `i32` for a float printed **`Success!` with wrong results** |
 | `barrier()` inside `if (i < n)` in a regression kernel | Possible deadlock in partially filled blocks; found by the barrier-divergence warning |
+| Vector values in function signatures were accepted | **kernc segfaulted** on a `float4` kernel parameter or on any call passing or returning a vector; an uncalled `func int2` was emitted with a `.b32` return value, dropping `y` |
 
 ---
 
 ## Limitations
 
 - **Not supported yet:** structs, 64-bit integers other than pointers, `bool` kernel
-  parameters, and vector values as device-function parameters or return values (vector
-  *pointers* work).
+  parameters, and vector values as kernel or device-function parameters or return values
+  (Sema rejects them and suggests a vector pointer, which works).
 - **The optimizer is local.** CSE, copy propagation and scheduling work within basic blocks;
   there is no global value numbering, loop-invariant code motion or partial unrolling.
 - **Unrolling is not controlled by `-O0`**, because it happens in IRGen.

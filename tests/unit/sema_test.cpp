@@ -304,6 +304,33 @@ TEST(SemaTest, AtomicsRejectVectorTargets) {
     }
 }
 
+TEST(SemaTest, VectorValuesRejectedInSignatures) {
+    // A vector value cannot be a kernel or device-function parameter, or a return value.
+    // Before these checks Sema accepted them: kernc crashed on any such parameter or call, and an
+    // uncalled `func int2` was emitted as a .b32 return value, losing the y component.
+    const std::pair<const char*, const char*> cases[] = {
+        {"kernel k(float4 v, float4* o) { o[0] = v; }",
+         "1:10: error: kernel parameter 'v' cannot have vector type 'float4' (pass a 'float4*' instead)"},
+        {"func float a(int2 v) { return 1.0; }\nkernel k() { }",
+         "1:14: error: parameter 'v' cannot have vector type 'int2' (pass a 'int2*' instead)"},
+        {"func float4 b(float x) { return float4(x, x, x, x); }\nkernel k(float4* o) { o[0] = b(1.0); }",
+         "1:1: error: device functions cannot return vector type 'float4'"},
+        {"func int2 c() { return int2(1, 2); }\nkernel k() { }",
+         "device functions cannot return vector type 'int2'"},
+    };
+    for (const auto& [src, expected] : cases) {
+        DiagnosticsEngine diag;
+        EXPECT_FALSE(checkSource(src, diag)) << src;
+        EXPECT_NE(diag.formatAll().find(expected), std::string::npos) << src << "\n" << diag.formatAll();
+    }
+
+    // Vector pointers still work in both places.
+    DiagnosticsEngine diag;
+    EXPECT_TRUE(checkSource("func void put(float4* p, int i) { p[i].x = 1.0; }\n"
+                            "kernel k(float4* o) { put(o, 0); }", diag))
+        << diag.formatAll();
+}
+
 TEST(SemaTest, NonIntSubscript) {
     std::string src = "kernel test(float* p) {\n"
                       "    float y = p[1.5];\n"
